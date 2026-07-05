@@ -1,4 +1,4 @@
-use enigo::{Axis, Button, Coordinate, Direction, Enigo, Mouse, Settings};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
 use phonepad_protocol::{ButtonAction, MouseButton};
 
 use crate::settings::ReceiverSettings;
@@ -65,6 +65,13 @@ impl InputController {
         self.enigo
             .button(to_enigo_button(button), direction)
             .map_err(|err| err.to_string())
+    }
+
+    pub fn type_text(&mut self, text: &str) -> Result<(), String> {
+        if text.is_empty() {
+            return Ok(());
+        }
+        self.enigo.text(text).map_err(|err| err.to_string())
     }
 }
 

@@ -26,6 +26,8 @@ class HapticsManager(context: Context) {
 
     fun disconnected() = pulse(40, 180)
 
+    fun textSent() = pulse(10, 45)
+
     private fun pulse(amplitude: Int, durationMs: Long) {
         val target = vibrator ?: return
         if (!target.hasVibrator()) return

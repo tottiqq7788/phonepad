@@ -19,6 +19,11 @@ data class ReceiverStatus(
     val deviceName: String,
 )
 
+data class ControlResponse(
+    val ok: Boolean,
+    val error: String? = null,
+)
+
 class ControlClient {
     suspend fun fetchStatus(
         host: String,
@@ -27,16 +32,7 @@ class ControlClient {
         port: Int = Protocol.TCP_CONTROL_PORT,
     ): ReceiverStatus? = withContext(Dispatchers.IO) {
         runCatching {
-            Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), 1200)
-                socket.soTimeout = 1200
-                val request = JSONObject()
-                    .put("type", "status")
-                    .put("deviceId", deviceId)
-                    .put("secret", secret)
-                    .toString() + "\n"
-                socket.getOutputStream().write(request.toByteArray())
-                val jsonText = TcpStatusReader.readJson(socket.getInputStream()) ?: return@runCatching null
+            sendRequest(host, port, buildRequest("status", deviceId, secret)) { jsonText ->
                 val json = JSONObject(jsonText)
                 ReceiverStatus(
                     running = json.optBoolean("running"),
@@ -51,5 +47,56 @@ class ControlClient {
                 )
             }
         }.getOrNull()
+    }
+
+    suspend fun sendText(
+        host: String,
+        deviceId: String,
+        secret: String,
+        text: String,
+        port: Int = Protocol.TCP_CONTROL_PORT,
+    ): ControlResponse = withContext(Dispatchers.IO) {
+        runCatching {
+            sendRequest(host, port, buildRequest("text", deviceId, secret, text)) { jsonText ->
+                val json = JSONObject(jsonText)
+                ControlResponse(
+                    ok = json.optBoolean("ok"),
+                    error = json.optString("error").takeIf { it.isNotBlank() },
+                )
+            } ?: ControlResponse(ok = false, error = "未收到桌面端响应")
+        }.getOrElse { err ->
+            ControlResponse(ok = false, error = err.message ?: "发送失败")
+        }
+    }
+
+    private fun buildRequest(
+        type: String,
+        deviceId: String,
+        secret: String,
+        content: String? = null,
+    ): String {
+        val request = JSONObject()
+            .put("type", type)
+            .put("deviceId", deviceId)
+            .put("secret", secret)
+        if (content != null) {
+            request.put("content", content)
+        }
+        return request.toString() + "\n"
+    }
+
+    private inline fun <T> sendRequest(
+        host: String,
+        port: Int,
+        request: String,
+        parse: (String) -> T,
+    ): T? {
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress(host, port), 3000)
+            socket.soTimeout = 3000
+            socket.getOutputStream().write(request.toByteArray())
+            val jsonText = TcpStatusReader.readJson(socket.getInputStream()) ?: return null
+            return parse(jsonText)
+        }
     }
 }

@@ -18,6 +18,10 @@ use phonepad_protocol::{
 
 use crate::{device_config::DeviceConfig, input::InputController, settings::ReceiverSettings};
 
+pub const MAX_TEXT_CHARS: usize = 4096;
+pub const MAX_TEXT_BYTES: usize = 6000;
+pub const MAX_CONTROL_REQUEST_BYTES: usize = 8192;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReceiverStatus {
@@ -63,6 +67,14 @@ struct ControlRequest {
     request_type: String,
     device_id: String,
     secret: String,
+    content: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ControlResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 pub struct ReceiverHandle {
@@ -79,6 +91,24 @@ impl ReceiverHandle {
         self.shutdown.store(true, Ordering::Relaxed);
         self.status.lock().unwrap().running = false;
     }
+}
+
+pub fn validate_text_content(content: &str) -> Result<&str, String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err("文本为空".into());
+    }
+    if trimmed.chars().count() > MAX_TEXT_CHARS {
+        return Err(format!("文本超过 {MAX_TEXT_CHARS} 字符限制"));
+    }
+    if trimmed.as_bytes().len() > MAX_TEXT_BYTES {
+        return Err(format!("文本超过 {MAX_TEXT_BYTES} 字节限制"));
+    }
+    Ok(trimmed)
+}
+
+fn is_oversize_control_request(total: usize, buf: &[u8]) -> bool {
+    total >= MAX_CONTROL_REQUEST_BYTES && !buf[..total].contains(&b'\n')
 }
 
 pub fn start(
@@ -276,8 +306,8 @@ fn spawn_discovery_loop(
     });
 }
 
-fn read_control_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
-    let mut buf = [0u8; 512];
+fn read_control_request(stream: &mut std::net::TcpStream) -> std::io::Result<(String, bool)> {
+    let mut buf = vec![0u8; MAX_CONTROL_REQUEST_BYTES];
     let mut total = 0usize;
     loop {
         match stream.read(&mut buf[total..]) {
@@ -297,7 +327,41 @@ fn read_control_request(stream: &mut std::net::TcpStream) -> std::io::Result<Str
             Err(err) => return Err(err),
         }
     }
-    Ok(String::from_utf8_lossy(&buf[..total]).trim().to_string())
+    let oversize = is_oversize_control_request(total, &buf);
+    Ok((String::from_utf8_lossy(&buf[..total]).trim().to_string(), oversize))
+}
+
+fn write_control_response(stream: &mut std::net::TcpStream, response: &ControlResponse) {
+    if let Ok(payload) = serde_json::to_vec(response) {
+        let _ = stream.write_all(&payload);
+    }
+}
+
+fn handle_text_request(
+    input: &mut InputController,
+    content: Option<String>,
+) -> ControlResponse {
+    let raw = content.unwrap_or_default();
+    let validated = match validate_text_content(&raw) {
+        Ok(text) => text,
+        Err(error) => {
+            return ControlResponse {
+                ok: false,
+                error: Some(error),
+            };
+        }
+    };
+
+    match input.type_text(validated) {
+        Ok(()) => ControlResponse {
+            ok: true,
+            error: None,
+        },
+        Err(error) => ControlResponse {
+            ok: false,
+            error: Some(error),
+        },
+    }
 }
 
 fn spawn_control_loop(
@@ -308,34 +372,80 @@ fn spawn_control_loop(
     status: Arc<Mutex<ReceiverStatus>>,
 ) {
     thread::spawn(move || {
+        let mut input = InputController::new().ok();
+
         while !shutdown.load(Ordering::Relaxed) {
             match listener.accept() {
                 Ok((mut stream, peer)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
-                    let request_text = read_control_request(&mut stream).unwrap_or_default();
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                    let (request_text, oversize) =
+                        read_control_request(&mut stream).unwrap_or_default();
+                    if oversize {
+                        write_control_response(
+                            &mut stream,
+                            &ControlResponse {
+                                ok: false,
+                                error: Some("请求体过大".into()),
+                            },
+                        );
+                        continue;
+                    }
+                    if request_text.is_empty() {
+                        continue;
+                    }
                     let request = match serde_json::from_str::<ControlRequest>(&request_text) {
                         Ok(request) => request,
                         Err(_) => continue,
                     };
-                    if request.request_type != "status" {
-                        continue;
-                    }
 
                     let device_config = device.lock().unwrap().clone();
                     if !device_config.validate_secret(&request.device_id, &request.secret) {
+                        if request.request_type == "text" {
+                            write_control_response(
+                                &mut stream,
+                                &ControlResponse {
+                                    ok: false,
+                                    error: Some("认证失败".into()),
+                                },
+                            );
+                        }
                         continue;
                     }
 
-                    let snapshot = {
-                        let mut snapshot = status.lock().unwrap().clone();
-                        snapshot.device_id = device_config.device_id.clone();
-                        snapshot.device_name = device_config.device_name.clone();
-                        snapshot
-                    };
-                    let payload = serde_json::to_vec(&snapshot).unwrap_or_default();
-                    let _ = stream.write_all(&payload);
-                    status.lock().unwrap().last_client = Some(peer.to_string());
-                    let _ = app.emit("receiver://status", snapshot);
+                    match request.request_type.as_str() {
+                        "status" => {
+                            let snapshot = {
+                                let mut snapshot = status.lock().unwrap().clone();
+                                snapshot.device_id = device_config.device_id.clone();
+                                snapshot.device_name = device_config.device_name.clone();
+                                snapshot
+                            };
+                            let payload = serde_json::to_vec(&snapshot).unwrap_or_default();
+                            let _ = stream.write_all(&payload);
+                            status.lock().unwrap().last_client = Some(peer.to_string());
+                            let _ = app.emit("receiver://status", snapshot);
+                        }
+                        "text" => {
+                            if input.is_none() {
+                                input = InputController::new().ok();
+                            }
+                            let response = match input.as_mut() {
+                                Some(controller) => {
+                                    handle_text_request(controller, request.content)
+                                }
+                                None => ControlResponse {
+                                    ok: false,
+                                    error: Some("无法初始化输入控制器".into()),
+                                },
+                            };
+                            let succeeded = response.ok;
+                            write_control_response(&mut stream, &response);
+                            if succeeded {
+                                status.lock().unwrap().last_client = Some(peer.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(80));
@@ -370,5 +480,45 @@ mod tests {
         };
         assert!(!device.validate_secret("dev-1", "wrong"));
         assert!(device.validate_secret("dev-1", "secret"));
+    }
+
+    #[test]
+    fn rejects_empty_text_content() {
+        assert!(validate_text_content("").is_err());
+        assert!(validate_text_content("   ").is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_text_content() {
+        let text = "a".repeat(MAX_TEXT_CHARS + 1);
+        assert!(validate_text_content(&text).is_err());
+    }
+
+    #[test]
+    fn accepts_valid_text_content() {
+        assert_eq!(validate_text_content("  hello  ").unwrap(), "hello");
+    }
+
+    #[test]
+    fn rejects_overlong_text_bytes() {
+        let text = "你".repeat(MAX_TEXT_BYTES);
+        assert!(validate_text_content(&text).is_err());
+    }
+
+    #[test]
+    fn detects_oversize_control_request_without_newline() {
+        let buf = vec![b'a'; MAX_CONTROL_REQUEST_BYTES];
+        assert!(is_oversize_control_request(buf.len(), &buf));
+        let mut with_newline = buf.clone();
+        with_newline[MAX_CONTROL_REQUEST_BYTES - 1] = b'\n';
+        assert!(!is_oversize_control_request(with_newline.len(), &with_newline));
+    }
+
+    #[test]
+    fn parses_text_control_request() {
+        let json = r#"{"type":"text","deviceId":"dev-1","secret":"secret","content":"你好"}"#;
+        let request: ControlRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.request_type, "text");
+        assert_eq!(request.content.as_deref(), Some("你好"));
     }
 }

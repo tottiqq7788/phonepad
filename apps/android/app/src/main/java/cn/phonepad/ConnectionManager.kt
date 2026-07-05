@@ -32,6 +32,8 @@ data class ConnectionUiState(
     val packetsReceived: Long = 0,
     val error: String? = null,
     val showDevicePicker: Boolean = false,
+    val textSending: Boolean = false,
+    val textInputError: String? = null,
 )
 
 class ConnectionManager(
@@ -50,6 +52,12 @@ class ConnectionManager(
     private var monitorJob: Job? = null
     private var onlineJob: Job? = null
     private var onlineRefreshJob: Job? = null
+    private var textSendJob: Job? = null
+
+    companion object {
+        private const val MAX_TEXT_CHARS = 4096
+        private const val MAX_TEXT_BYTES = 6000
+    }
 
     init {
         refreshDevices()
@@ -202,6 +210,7 @@ class ConnectionManager(
 
     fun disconnect() {
         monitorJob?.cancel()
+        textSendJob?.cancel()
         touchpadEngine.setTarget(null)
         inputSender.setSecret("")
         uiState = uiState.copy(
@@ -213,6 +222,8 @@ class ConnectionManager(
             lastRttMs = null,
             error = null,
             showDevicePicker = false,
+            textSending = false,
+            textInputError = null,
         )
         haptics.disconnected()
         refreshOnlineStates()
@@ -225,6 +236,64 @@ class ConnectionManager(
 
     fun closeDevicePicker() {
         uiState = uiState.copy(showDevicePicker = false)
+    }
+
+    fun clearTextInputError() {
+        uiState = uiState.copy(textInputError = null)
+    }
+
+    fun sendTextToActiveDevice(text: String, onSuccess: () -> Unit = {}) {
+        if (uiState.textSending) {
+            return
+        }
+        textSendJob?.cancel()
+        textSendJob = scope.launch {
+            val trimmed = text.trim()
+            if (trimmed.isEmpty()) {
+                uiState = uiState.copy(textInputError = "请输入要发送的内容")
+                return@launch
+            }
+            if (trimmed.length > MAX_TEXT_CHARS) {
+                uiState = uiState.copy(textInputError = "文本超过 $MAX_TEXT_CHARS 字符限制")
+                return@launch
+            }
+            if (trimmed.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) {
+                uiState = uiState.copy(textInputError = "文本过长，请缩短后重试")
+                return@launch
+            }
+            if (!uiState.connected || uiState.activeDeviceId.isBlank()) {
+                uiState = uiState.copy(textInputError = "设备未连接")
+                return@launch
+            }
+            val device = store.load().firstOrNull { it.id == uiState.activeDeviceId }
+            if (device == null) {
+                uiState = uiState.copy(textInputError = "设备不存在，请重新连接")
+                return@launch
+            }
+
+            uiState = uiState.copy(textSending = true, textInputError = null)
+            val response = controlClient.sendText(
+                host = device.host,
+                deviceId = device.id,
+                secret = device.secret,
+                port = device.tcpPort,
+                text = trimmed,
+            )
+            if (!isActive || !uiState.connected) {
+                uiState = uiState.copy(textSending = false)
+                return@launch
+            }
+            if (response.ok) {
+                haptics.textSent()
+                uiState = uiState.copy(textSending = false, textInputError = null)
+                onSuccess()
+            } else {
+                uiState = uiState.copy(
+                    textSending = false,
+                    textInputError = response.error ?: "发送失败，请确认桌面端仍在接收",
+                )
+            }
+        }
     }
 
     private fun startMonitor(device: PairedDevice) {
@@ -255,6 +324,7 @@ class ConnectionManager(
     fun release() {
         monitorJob?.cancel()
         onlineJob?.cancel()
+        textSendJob?.cancel()
         inputSender.close()
     }
 }

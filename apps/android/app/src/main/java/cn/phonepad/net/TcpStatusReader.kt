@@ -6,7 +6,7 @@ import java.net.SocketTimeoutException
 
 object TcpStatusReader {
     fun readJson(input: InputStream): String? {
-        val buffer = ByteArray(512)
+        val buffer = ByteArray(8192)
         val builder = StringBuilder()
 
         while (true) {

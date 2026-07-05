@@ -2,6 +2,7 @@ package cn.phonepad.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,14 +24,21 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.KeyboardVoice
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,12 +46,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -92,6 +106,8 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             onOpenDevicePicker = connectionManager::openDevicePicker,
             onCloseDevicePicker = connectionManager::closeDevicePicker,
             onSelectDevice = connectionManager::connectToDevice,
+            onSendText = connectionManager::sendTextToActiveDevice,
+            onClearTextInputError = connectionManager::clearTextInputError,
         )
     } else {
         DeviceHomeScreen(
@@ -284,8 +300,21 @@ private fun TouchpadScreen(
     onOpenDevicePicker: () -> Unit,
     onCloseDevicePicker: () -> Unit,
     onSelectDevice: (String) -> Unit,
+    onSendText: (String, () -> Unit) -> Unit,
+    onClearTextInputError: () -> Unit,
 ) {
     var showHelp by remember { mutableStateOf(false) }
+    var showTextInput by remember { mutableStateOf(false) }
+
+    fun closeTextInput() {
+        if (state.textSending) return
+        onClearTextInputError()
+        showTextInput = false
+    }
+
+    BackHandler(enabled = showTextInput && !state.textSending) {
+        closeTextInput()
+    }
 
     Row(
         modifier = Modifier
@@ -294,80 +323,231 @@ private fun TouchpadScreen(
     ) {
         LeftRail(
             state = state,
-            onToggleHelp = { showHelp = !showHelp },
-            onOpenDevicePicker = onOpenDevicePicker,
+            onToggleHelp = {
+                if (showTextInput) return@LeftRail
+                showHelp = !showHelp
+                if (showHelp) {
+                    onCloseDevicePicker()
+                }
+            },
+            onOpenDevicePicker = {
+                if (showTextInput) return@LeftRail
+                showHelp = false
+                onOpenDevicePicker()
+            },
         )
 
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
-                .background(TouchpadSurface),
+                .background(if (showTextInput) BgBase else TouchpadSurface),
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .pointerInput(Unit) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Main)
-                                val pressed = event.changes.filter { it.pressed }
-                                val count = pressed.size
-                                val time = event.changes.firstOrNull()?.uptimeMillis ?: System.currentTimeMillis()
-
-                                val downs = event.changes.count { it.changedToDown() }
-                                val ups = event.changes.count { it.changedToUp() }
-                                val prevCount = count + ups - downs
-
-                                if (downs > 0 && prevCount == 0) {
-                                    val center = pressedCenter(pressed)
-                                    engine.onPointerDown(count, center.first, center.second, time)
-                                }
-                                if (ups > 0) {
-                                    val upChange = event.changes.first { it.changedToUp() }
-                                    engine.onPointerUp(count, upChange.position.x, upChange.position.y, time)
-                                } else if (count > 0 && downs == 0) {
-                                    val center = pressedCenter(pressed)
-                                    engine.onPointerMove(count, center.first, center.second)
-                                }
-
-                                event.changes.forEach { it.consume() }
-                            }
+            if (showTextInput) {
+                TextInputScreen(
+                    sending = state.textSending,
+                    error = state.textInputError,
+                    onBack = ::closeTextInput,
+                    onSend = { text ->
+                        onSendText(text) {
+                            closeTextInput()
                         }
                     },
-            )
-
-            Text(
-                text = state.activeDeviceName,
-                color = TextMuted.copy(alpha = 0.75f),
-                fontSize = 11.sp,
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = 12.dp, top = 10.dp),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-
-            if (showHelp) {
-                HelpOverlay(onDismiss = { showHelp = false })
-            }
-
-            if (state.showDevicePicker) {
-                DevicePickerOverlay(
-                    devices = state.pairedDevices,
-                    activeDeviceId = state.activeDeviceId,
-                    onDismiss = onCloseDevicePicker,
-                    onSelectDevice = onSelectDevice,
                 )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent(PointerEventPass.Main)
+                                    val pressed = event.changes.filter { it.pressed }
+                                    val count = pressed.size
+                                    val time = event.changes.firstOrNull()?.uptimeMillis ?: System.currentTimeMillis()
+
+                                    val downs = event.changes.count { it.changedToDown() }
+                                    val ups = event.changes.count { it.changedToUp() }
+                                    val prevCount = count + ups - downs
+
+                                    if (downs > 0 && prevCount == 0) {
+                                        val center = pressedCenter(pressed)
+                                        engine.onPointerDown(count, center.first, center.second, time)
+                                    }
+                                    if (ups > 0) {
+                                        val upChange = event.changes.first { it.changedToUp() }
+                                        engine.onPointerUp(count, upChange.position.x, upChange.position.y, time)
+                                    } else if (count > 0 && downs == 0) {
+                                        val center = pressedCenter(pressed)
+                                        engine.onPointerMove(count, center.first, center.second)
+                                    }
+
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                        },
+                )
+
+                Text(
+                    text = state.activeDeviceName,
+                    color = TextMuted.copy(alpha = 0.75f),
+                    fontSize = 11.sp,
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(start = 12.dp, top = 10.dp),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+
+                if (showHelp) {
+                    HelpOverlay(onDismiss = { showHelp = false })
+                }
+
+                if (state.showDevicePicker) {
+                    DevicePickerOverlay(
+                        devices = state.pairedDevices,
+                        activeDeviceId = state.activeDeviceId,
+                        onDismiss = onCloseDevicePicker,
+                        onSelectDevice = onSelectDevice,
+                    )
+                }
             }
         }
 
         RightRail(
+            touchpadEnabled = !showTextInput,
             onDisconnect = onDisconnect,
             onLeftClick = engine::clickLeft,
             onRightClick = engine::clickRight,
             onMiddleClick = engine::clickMiddle,
+            onOpenTextInput = {
+                showHelp = false
+                onCloseDevicePicker()
+                onClearTextInputError()
+                showTextInput = true
+            },
         )
+    }
+}
+
+@Composable
+private fun TextInputScreen(
+    sending: Boolean,
+    error: String?,
+    onBack: () -> Unit,
+    onSend: (String) -> Unit,
+) {
+    var draft by remember { mutableStateOf("") }
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(Unit) {
+        focusRequester.requestFocus()
+        keyboardController?.show()
+    }
+
+    fun dismiss() {
+        if (sending) return
+        keyboardController?.hide()
+        onBack()
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding()
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            IconButton(onClick = ::dismiss, enabled = !sending) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "返回触控板",
+                    tint = TextSecondary,
+                )
+            }
+            Text(
+                text = "语音 / 文本输入",
+                color = TextPrimary,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+
+        Text(
+            text = "请先把电脑光标放到目标输入框，可使用手机输入法的语音输入",
+            color = TextMuted,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            BasicTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .focusRequester(focusRequester)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(BgPanel)
+                    .border(1.dp, BorderColor, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                textStyle = TextStyle(
+                    color = TextPrimary,
+                    fontSize = 16.sp,
+                    lineHeight = 24.sp,
+                ),
+                cursorBrush = SolidColor(Accent),
+                decorationBox = { innerTextField ->
+                    Box {
+                        if (draft.isEmpty()) {
+                            Text(
+                                text = "输入要发送到电脑的内容…",
+                                color = TextMuted,
+                                fontSize = 16.sp,
+                            )
+                        }
+                        innerTextField()
+                    }
+                },
+            )
+
+            Button(
+                onClick = { onSend(draft) },
+                enabled = draft.trim().isNotEmpty() && !sending,
+                modifier = Modifier
+                    .height(52.dp)
+                    .width(96.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Accent,
+                    contentColor = Color.White,
+                    disabledContainerColor = BgElevated,
+                    disabledContentColor = TextMuted,
+                ),
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Send,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(text = if (sending) "发送中" else "发送", fontSize = 14.sp)
+            }
+        }
+
+        error?.let { ErrorBanner(it) }
     }
 }
 
@@ -481,10 +661,12 @@ private fun LeftRail(
 
 @Composable
 private fun RightRail(
+    touchpadEnabled: Boolean,
     onDisconnect: () -> Unit,
     onLeftClick: () -> Unit,
     onRightClick: () -> Unit,
     onMiddleClick: () -> Unit,
+    onOpenTextInput: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -504,11 +686,18 @@ private fun RightRail(
             accent = ErrorColor,
         )
 
-        RailButton(label = "左", onClick = onLeftClick)
-        RailButton(label = "中", onClick = onMiddleClick)
-        RailButton(label = "右", onClick = onRightClick)
+        RailButton(label = "左", onClick = onLeftClick, enabled = touchpadEnabled)
+        RailButton(label = "中", onClick = onMiddleClick, enabled = touchpadEnabled)
+        RailButton(label = "右", onClick = onRightClick, enabled = touchpadEnabled)
 
         Spacer(modifier = Modifier.weight(1f))
+
+        RailIconButton(
+            icon = Icons.Filled.KeyboardVoice,
+            contentDescription = "语音输入",
+            onClick = onOpenTextInput,
+            accent = Accent,
+        )
 
         Spacer(modifier = Modifier.height(12.dp))
     }
@@ -544,6 +733,7 @@ private fun RailButton(
     label: String,
     onClick: () -> Unit,
     accent: Color = Accent,
+    enabled: Boolean = true,
 ) {
     Box(
         modifier = Modifier
@@ -551,12 +741,12 @@ private fun RailButton(
             .clip(RoundedCornerShape(10.dp))
             .background(BgElevated)
             .border(1.dp, BorderColor, RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick),
+            .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
-            color = accent,
+            color = if (enabled) accent else TextMuted,
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
