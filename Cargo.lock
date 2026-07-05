@@ -2364,7 +2364,7 @@ dependencies = [
 
 [[package]]
 name = "phonepad-desktop"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
@@ -2385,7 +2385,7 @@ dependencies = [
 
 [[package]]
 name = "phonepad-protocol"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
 ]
