@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 pub const MAGIC: [u8; 2] = *b"TP";
-pub const VERSION: u8 = 1;
-pub const PACKET_LEN: usize = 24;
+pub const VERSION: u8 = 2;
+pub const PACKET_LEN: usize = 32;
 pub const UDP_INPUT_PORT: u16 = 45454;
 pub const TCP_CONTROL_PORT: u16 = 45455;
 pub const UDP_DISCOVERY_PORT: u16 = 45456;
@@ -87,6 +87,7 @@ pub struct InputPacket {
     pub button: Option<MouseButton>,
     pub action: Option<ButtonAction>,
     pub fingers: u8,
+    pub auth_token: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,7 +101,15 @@ pub enum ProtocolError {
 }
 
 impl InputPacket {
-    pub fn movement(kind: PacketKind, sequence: u32, timestamp_micros: u64, x: i16, y: i16, fingers: u8) -> Self {
+    pub fn movement(
+        kind: PacketKind,
+        sequence: u32,
+        timestamp_micros: u64,
+        x: i16,
+        y: i16,
+        fingers: u8,
+        auth_token: u64,
+    ) -> Self {
         Self {
             kind,
             sequence,
@@ -110,10 +119,16 @@ impl InputPacket {
             button: None,
             action: None,
             fingers,
+            auth_token,
         }
     }
 
-    pub fn click(sequence: u32, timestamp_micros: u64, button: MouseButton) -> Self {
+    pub fn click(
+        sequence: u32,
+        timestamp_micros: u64,
+        button: MouseButton,
+        auth_token: u64,
+    ) -> Self {
         Self {
             kind: PacketKind::Click,
             sequence,
@@ -123,10 +138,17 @@ impl InputPacket {
             button: Some(button),
             action: Some(ButtonAction::Click),
             fingers: 0,
+            auth_token,
         }
     }
 
-    pub fn button(sequence: u32, timestamp_micros: u64, button: MouseButton, action: ButtonAction) -> Self {
+    pub fn button(
+        sequence: u32,
+        timestamp_micros: u64,
+        button: MouseButton,
+        action: ButtonAction,
+        auth_token: u64,
+    ) -> Self {
         Self {
             kind: PacketKind::Button,
             sequence,
@@ -136,6 +158,7 @@ impl InputPacket {
             button: Some(button),
             action: Some(action),
             fingers: 0,
+            auth_token,
         }
     }
 
@@ -151,6 +174,7 @@ impl InputPacket {
         out[20] = self.button.map(|button| button as u8).unwrap_or(0);
         out[21] = self.action.map(|action| action as u8).unwrap_or(0);
         out[22] = self.fingers;
+        out[24..32].copy_from_slice(&self.auth_token.to_le_bytes());
         out
     }
 
@@ -170,8 +194,17 @@ impl InputPacket {
         let timestamp_micros = u64::from_le_bytes(input[8..16].try_into().unwrap());
         let x = i16::from_le_bytes(input[16..18].try_into().unwrap());
         let y = i16::from_le_bytes(input[18..20].try_into().unwrap());
-        let button = if input[20] == 0 { None } else { Some(MouseButton::try_from(input[20])?) };
-        let action = if input[21] == 0 { None } else { Some(ButtonAction::try_from(input[21])?) };
+        let button = if input[20] == 0 {
+            None
+        } else {
+            Some(MouseButton::try_from(input[20])?)
+        };
+        let action = if input[21] == 0 {
+            None
+        } else {
+            Some(ButtonAction::try_from(input[21])?)
+        };
+        let auth_token = u64::from_le_bytes(input[24..32].try_into().unwrap());
 
         Ok(Self {
             kind,
@@ -182,8 +215,24 @@ impl InputPacket {
             button,
             action,
             fingers: input[22],
+            auth_token,
         })
     }
+}
+
+pub fn auth_token(secret: &str, sequence: u32) -> u64 {
+    let mut bytes = secret.as_bytes().to_vec();
+    bytes.extend_from_slice(&sequence.to_le_bytes());
+    fnv1a64(&bytes)
+}
+
+fn fnv1a64(data: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in data {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -192,32 +241,32 @@ mod tests {
 
     #[test]
     fn round_trips_move_packet() {
-        let packet = InputPacket::movement(PacketKind::Move, 42, 123_456, -7, 9, 1);
+        let token = auth_token("secret123", 42);
+        let packet = InputPacket::movement(PacketKind::Move, 42, 123_456, -7, 9, 1, token);
         let decoded = InputPacket::decode(&packet.encode()).unwrap();
         assert_eq!(decoded, packet);
     }
 
     #[test]
     fn move_packet_matches_android_golden_vector() {
-        let packet = InputPacket::movement(PacketKind::Move, 42, 123_456, -7, 9, 1);
-        assert_eq!(
-            packet.encode(),
-            [
-                0x54, 0x50, 0x01, 0x01, 0x2A, 0x00, 0x00, 0x00, 0x40, 0xE2, 0x01, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0xF9, 0xFF, 0x09, 0x00, 0x00, 0x00, 0x01, 0x00,
-            ]
-        );
+        let token = auth_token("secret123", 42);
+        let packet = InputPacket::movement(PacketKind::Move, 42, 123_456, -7, 9, 1, token);
+        assert_eq!(packet.encode()[0..4], [0x54, 0x50, 0x02, 0x01]);
+        assert_eq!(packet.encode()[24..32], token.to_le_bytes());
+    }
+
+    #[test]
+    fn auth_token_golden_vector() {
+        assert_eq!(auth_token("secret123", 42), 0x23B3FBC2_5869_9E45);
     }
 
     #[test]
     fn click_packet_matches_android_golden_vector() {
-        let packet = InputPacket::click(43, 123_999, MouseButton::Right);
-        assert_eq!(
-            packet.encode(),
-            [
-                0x54, 0x50, 0x01, 0x03, 0x2B, 0x00, 0x00, 0x00, 0x5F, 0xE4, 0x01, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x00,
-            ]
-        );
+        let token = auth_token("secret123", 43);
+        let packet = InputPacket::click(43, 123_999, MouseButton::Right, token);
+        let bytes = packet.encode();
+        assert_eq!(bytes[3], PacketKind::Click as u8);
+        assert_eq!(bytes[20], MouseButton::Right as u8);
+        assert_eq!(bytes[24..32], token.to_le_bytes());
     }
 }

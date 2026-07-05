@@ -1,20 +1,61 @@
 package cn.phonepad.net
 
+import cn.phonepad.protocol.Protocol
+import java.net.URLDecoder
+
+data class PairingPayload(
+    val deviceId: String,
+    val deviceName: String,
+    val host: String,
+    val tcpPort: Int,
+    val udpPort: Int,
+    val secret: String,
+)
+
 object PairingUrlParser {
-    fun parseHost(raw: String): String? {
+    fun parse(raw: String): PairingPayload? {
         val trimmed = raw.trim()
         if (trimmed.isBlank()) return null
 
         val withoutScheme = when {
             trimmed.startsWith("phonepad://", ignoreCase = true) ->
-                trimmed.removePrefix("phonepad://").removePrefix("PHONEPAD://")
-            trimmed.startsWith("totti-pad://", ignoreCase = true) ->
-                trimmed.removePrefix("totti-pad://").removePrefix("TOTTI-PAD://")
-            else -> trimmed
+                trimmed.substringAfter("://", trimmed)
+            else -> return null
         }
 
-        val hostPart = withoutScheme.substringBefore('/').substringBefore('?')
-        val host = hostPart.substringBefore(':').trim()
-        return host.takeIf { it.isNotBlank() && it != "desktop-ip" }
+        if (!withoutScheme.startsWith("pair", ignoreCase = true)) {
+            return null
+        }
+
+        val query = withoutScheme.substringAfter('?', "")
+        if (query.isBlank()) return null
+
+        val params = linkedMapOf<String, String>()
+        query.split('&').forEach { part ->
+            if (part.isBlank()) return@forEach
+            val key = part.substringBefore('=').trim()
+            val value = URLDecoder.decode(part.substringAfter('=', ""), Charsets.UTF_8.name())
+            params[key] = value
+        }
+
+        val host = params["host"]?.trim().orEmpty()
+        val deviceId = params["id"]?.trim().orEmpty()
+        val secret = params["secret"]?.trim().orEmpty()
+        val deviceName = params["name"]?.trim().orEmpty().ifBlank { "PhonePad Receiver" }
+        val tcpPort = params["tcp"]?.toIntOrNull() ?: Protocol.TCP_CONTROL_PORT
+        val udpPort = params["udp"]?.toIntOrNull() ?: Protocol.UDP_INPUT_PORT
+
+        if (host.isBlank() || deviceId.isBlank() || secret.isBlank()) {
+            return null
+        }
+
+        return PairingPayload(
+            deviceId = deviceId,
+            deviceName = deviceName,
+            host = host,
+            tcpPort = tcpPort,
+            udpPort = udpPort,
+            secret = secret,
+        )
     }
 }

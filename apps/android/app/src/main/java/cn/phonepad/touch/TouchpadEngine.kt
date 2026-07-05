@@ -8,6 +8,8 @@ import kotlin.math.hypot
 data class ReceiverTarget(
     val host: String,
     val udpPort: Int = Protocol.UDP_INPUT_PORT,
+    val deviceId: String = "",
+    val deviceName: String = "",
 )
 
 class TouchpadEngine(
@@ -44,7 +46,7 @@ class TouchpadEngine(
         sender.send(
             host.host,
             host.udpPort,
-            Protocol.InputPacket.click(0, now, button),
+            Protocol.InputPacket.click(0, now, button, authToken = 0L),
         )
         haptic()
     }
@@ -86,7 +88,7 @@ class TouchpadEngine(
                 sender.send(
                     host.host,
                     host.udpPort,
-                    Protocol.InputPacket.move(0, now, dx.toInt(), dy.toInt(), fingers = 1),
+                    Protocol.InputPacket.move(0, now, dx.toInt(), dy.toInt(), authToken = 0L, fingers = 1),
                 )
             }
 
@@ -104,7 +106,7 @@ class TouchpadEngine(
                 sender.send(
                     host.host,
                     host.udpPort,
-                    Protocol.InputPacket.scroll(0, now, dx.toInt(), dy.toInt()),
+                    Protocol.InputPacket.scroll(0, now, dx.toInt(), dy.toInt(), authToken = 0L),
                 )
             }
 
@@ -128,7 +130,7 @@ class TouchpadEngine(
                         sender.send(
                             host.host,
                             host.udpPort,
-                            Protocol.InputPacket.click(0, now, Protocol.MouseButton.Left),
+                            Protocol.InputPacket.click(0, now, Protocol.MouseButton.Left, authToken = 0L),
                         )
                         haptics.leftClick()
                     }
@@ -140,7 +142,7 @@ class TouchpadEngine(
                         sender.send(
                             host.host,
                             host.udpPort,
-                            Protocol.InputPacket.click(0, now, Protocol.MouseButton.Right),
+                            Protocol.InputPacket.click(0, now, Protocol.MouseButton.Right, authToken = 0L),
                         )
                         haptics.rightClick()
                     }

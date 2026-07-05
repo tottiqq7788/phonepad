@@ -6,7 +6,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,12 +22,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CameraAlt
+import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.SwapHoriz
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -52,11 +51,14 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import cn.phonepad.ConnectionManager
 import cn.phonepad.ConnectionUiState
-import cn.phonepad.net.DiscoveredReceiver
-import cn.phonepad.net.PairingUrlParser
+import cn.phonepad.model.DeviceOnlineState
+import cn.phonepad.model.PairedDevice
 import cn.phonepad.touch.TouchpadEngine
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private val BgBase = Color(0xFF0A0C10)
 private val BgPanel = Color(0xFF12151C)
@@ -80,37 +82,35 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             state = state,
             engine = engine,
             onDisconnect = connectionManager::disconnect,
+            onOpenDevicePicker = connectionManager::openDevicePicker,
+            onCloseDevicePicker = connectionManager::closeDevicePicker,
+            onSelectDevice = connectionManager::connectToDevice,
         )
     } else {
-        ConnectScreen(
+        DeviceHomeScreen(
             state = state,
-            onDiscover = connectionManager::discover,
-            onConnect = connectionManager::connect,
+            onScan = connectionManager::pairFromScan,
+            onConnectDevice = connectionManager::connectToDevice,
+            onRefreshOnline = connectionManager::refreshOnlineStates,
         )
     }
 }
 
 @Composable
-private fun ConnectScreen(
+private fun DeviceHomeScreen(
     state: ConnectionUiState,
-    onDiscover: () -> Unit,
-    onConnect: (String) -> Unit,
+    onScan: (String) -> Unit,
+    onConnectDevice: (String) -> Unit,
+    onRefreshOnline: () -> Unit,
 ) {
     val context = LocalContext.current
-    var manualHost by remember(state.host) { mutableStateOf(state.host) }
     var scanError by remember { mutableStateOf<String?>(null) }
 
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         scanError = null
         val raw = result.contents
         if (raw.isNullOrBlank()) return@rememberLauncherForActivityResult
-        val host = PairingUrlParser.parseHost(raw)
-        if (host == null) {
-            scanError = "无法识别二维码，请扫描 PhonePad 桌面端配对二维码。"
-            return@rememberLauncherForActivityResult
-        }
-        manualHost = host
-        onConnect(host)
+        onScan(raw)
     }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
@@ -143,197 +143,137 @@ private fun ConnectScreen(
         }
     }
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BgBase)
             .padding(horizontal = 24.dp, vertical = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(24.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Column(
-            modifier = Modifier
-                .weight(0.38f)
-                .fillMaxHeight(),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = "PhonePad",
-                color = TextPrimary,
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = (-0.5).sp,
-            )
-            Text(
-                text = "将手机变成低延迟触控板",
-                color = TextSecondary,
-                fontSize = 14.sp,
-                lineHeight = 20.sp,
-            )
-
-            StatusBlock(
-                label = "连接状态",
-                value = state.discoveryStage.ifBlank { "等待搜索或手动连接" },
-                accent = if (state.discovering) Accent else TextSecondary,
-            )
-
-            if (state.host.isNotBlank()) {
-                StatusBlock(label = "最近连接", value = state.host, accent = TextPrimary)
-            }
-
-            state.error?.let {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(ErrorColor.copy(alpha = 0.12f))
-                        .border(1.dp, ErrorColor.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
-                        .padding(12.dp),
-                ) {
-                    Text(text = it, color = ErrorColor, fontSize = 13.sp, lineHeight = 18.sp)
-                }
-            }
-
-            scanError?.let {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(ErrorColor.copy(alpha = 0.12f))
-                        .border(1.dp, ErrorColor.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
-                        .padding(12.dp),
-                ) {
-                    Text(text = it, color = ErrorColor, fontSize = 13.sp, lineHeight = 18.sp)
-                }
-            }
-
-            Spacer(modifier = Modifier.weight(1f))
-
-            Text(
-                text = "请确保手机与电脑在同一 Wi-Fi 网络",
-                color = TextMuted,
-                fontSize = 12.sp,
-            )
-        }
-
-        Column(
-            modifier = Modifier
-                .weight(0.62f)
-                .fillMaxHeight()
-                .clip(RoundedCornerShape(16.dp))
-                .background(BgPanel)
-                .border(1.dp, BorderColor, RoundedCornerShape(16.dp))
-                .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Button(
-                    onClick = onDiscover,
-                    enabled = !state.discovering,
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = BgBase),
-                    shape = RoundedCornerShape(10.dp),
-                ) {
-                    Text(if (state.discovering) "搜索中..." else "搜索接收端")
-                }
-                OutlinedButton(
-                    onClick = ::startScan,
-                    shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, BorderColor),
-                ) {
-                    Text("扫码连接", color = TextPrimary)
-                }
-            }
-
-            OutlinedTextField(
-                value = manualHost,
-                onValueChange = { manualHost = it },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("电脑 IP 或 phonepad:// 地址", color = TextMuted) },
-                singleLine = true,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedTextColor = TextPrimary,
-                    unfocusedTextColor = TextPrimary,
-                    focusedBorderColor = Accent,
-                    unfocusedBorderColor = BorderColor,
-                    cursorColor = Accent,
-                ),
-                shape = RoundedCornerShape(10.dp),
-            )
-
-            Button(
-                onClick = { onConnect(manualHost.trim()) },
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = BgBase),
-                shape = RoundedCornerShape(10.dp),
-            ) {
-                Text("连接")
-            }
-
-            if (state.discovered.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    text = "已发现 ${state.discovered.size} 个设备",
-                    color = TextSecondary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    text = "PhonePad",
+                    color = TextPrimary,
+                    fontSize = 28.sp,
+                    fontWeight = FontWeight.Bold,
                 )
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(state.discovered) { receiver ->
-                        ReceiverCard(receiver = receiver, onConnect = onConnect)
-                    }
+                Text(
+                    text = "已配对设备",
+                    color = TextSecondary,
+                    fontSize = 14.sp,
+                )
+            }
+            IconButton(onClick = ::startScan) {
+                Icon(
+                    imageVector = Icons.Filled.CameraAlt,
+                    contentDescription = "扫码连接",
+                    tint = Accent,
+                    modifier = Modifier.size(28.dp),
+                )
+            }
+        }
+
+        if (state.checkingOnline) {
+            Text(text = "正在检测设备状态...", color = TextMuted, fontSize = 12.sp)
+        }
+
+        state.error?.let { ErrorBanner(it) }
+        scanError?.let { ErrorBanner(it) }
+
+        if (state.pairedDevices.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(BgPanel)
+                    .border(1.dp, BorderColor, RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(text = "还没有配对设备", color = TextSecondary, fontSize = 16.sp)
+                    Text(text = "点击右上角相机图标扫码连接", color = TextMuted, fontSize = 13.sp)
                 }
-            } else {
-                Spacer(modifier = Modifier.weight(1f))
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(state.pairedDevices, key = { it.id }) { device ->
+                    PairedDeviceCard(
+                        device = device,
+                        onClick = {
+                            onRefreshOnline()
+                            onConnectDevice(device.id)
+                        },
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun StatusBlock(label: String, value: String, accent: Color) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(BgPanel)
-            .border(1.dp, BorderColor, RoundedCornerShape(10.dp))
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Text(text = label, color = TextMuted, fontSize = 11.sp, letterSpacing = 0.5.sp)
-        Text(text = value, color = accent, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+private fun PairedDeviceCard(device: PairedDevice, onClick: () -> Unit) {
+    val online = device.onlineState == DeviceOnlineState.Online
+    val timeLabel = if (device.lastConnectedAt > 0) {
+        SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(device.lastConnectedAt))
+    } else {
+        "未连接"
     }
-}
 
-@Composable
-private fun ReceiverCard(receiver: DiscoveredReceiver, onConnect: (String) -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(BgElevated)
-            .border(1.dp, BorderColor, RoundedCornerShape(10.dp))
-            .clickable { onConnect(receiver.ip) }
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .clip(RoundedCornerShape(12.dp))
+            .background(BgPanel)
+            .border(1.dp, BorderColor, RoundedCornerShape(12.dp))
+            .clickable(enabled = online, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = receiver.name,
-                color = TextPrimary,
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp,
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.weight(1f),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .clip(CircleShape)
+                    .background(if (online) Success else TextMuted),
             )
-            Text(
-                text = "${receiver.ip}:${receiver.tcpPort}",
-                color = TextMuted,
-                fontSize = 12.sp,
-                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = device.name,
+                    color = if (online) TextPrimary else TextSecondary,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = "${device.host} · 最近 $timeLabel",
+                    color = TextMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
-        Text(text = "连接", color = Accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            text = if (online) "进入" else "离线",
+            color = if (online) Accent else TextMuted,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 
@@ -342,6 +282,9 @@ private fun TouchpadScreen(
     state: ConnectionUiState,
     engine: TouchpadEngine,
     onDisconnect: () -> Unit,
+    onOpenDevicePicker: () -> Unit,
+    onCloseDevicePicker: () -> Unit,
+    onSelectDevice: (String) -> Unit,
 ) {
     var showHelp by remember { mutableStateOf(false) }
 
@@ -352,67 +295,150 @@ private fun TouchpadScreen(
     ) {
         LeftRail(
             state = state,
-            onLeftClick = engine::clickLeft,
+            onToggleHelp = { showHelp = !showHelp },
+            onOpenDevicePicker = onOpenDevicePicker,
         )
 
         Box(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
-                .background(TouchpadSurface)
-                .pointerInput(Unit) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Main)
-                            val pressed = event.changes.filter { it.pressed }
-                            val count = pressed.size
-                            val time = event.changes.firstOrNull()?.uptimeMillis ?: System.currentTimeMillis()
-
-                            val downs = event.changes.count { it.changedToDown() }
-                            val ups = event.changes.count { it.changedToUp() }
-                            val prevCount = count + ups - downs
-
-                            if (downs > 0 && prevCount == 0) {
-                                val center = pressedCenter(pressed)
-                                engine.onPointerDown(count, center.first, center.second, time)
-                            }
-                            if (ups > 0) {
-                                val upChange = event.changes.first { it.changedToUp() }
-                                engine.onPointerUp(count, upChange.position.x, upChange.position.y, time)
-                            } else if (count > 0 && downs == 0) {
-                                val center = pressedCenter(pressed)
-                                engine.onPointerMove(count, center.first, center.second)
-                            }
-
-                            event.changes.forEach { it.consume() }
-                        }
-                    }
-                },
+                .background(TouchpadSurface),
         ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Main)
+                                val pressed = event.changes.filter { it.pressed }
+                                val count = pressed.size
+                                val time = event.changes.firstOrNull()?.uptimeMillis ?: System.currentTimeMillis()
+
+                                val downs = event.changes.count { it.changedToDown() }
+                                val ups = event.changes.count { it.changedToUp() }
+                                val prevCount = count + ups - downs
+
+                                if (downs > 0 && prevCount == 0) {
+                                    val center = pressedCenter(pressed)
+                                    engine.onPointerDown(count, center.first, center.second, time)
+                                }
+                                if (ups > 0) {
+                                    val upChange = event.changes.first { it.changedToUp() }
+                                    engine.onPointerUp(count, upChange.position.x, upChange.position.y, time)
+                                } else if (count > 0 && downs == 0) {
+                                    val center = pressedCenter(pressed)
+                                    engine.onPointerMove(count, center.first, center.second)
+                                }
+
+                                event.changes.forEach { it.consume() }
+                            }
+                        }
+                    },
+            )
+
             Text(
-                text = "单指移动/单击 · 双指滚动/右键",
-                color = TextMuted.copy(alpha = 0.6f),
+                text = state.activeDeviceName,
+                color = TextMuted.copy(alpha = 0.75f),
                 fontSize = 11.sp,
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 12.dp),
+                    .align(Alignment.TopStart)
+                    .padding(start = 12.dp, top = 10.dp),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
+
             if (showHelp) {
                 HelpOverlay(onDismiss = { showHelp = false })
+            }
+
+            if (state.showDevicePicker) {
+                DevicePickerOverlay(
+                    devices = state.pairedDevices,
+                    activeDeviceId = state.activeDeviceId,
+                    onDismiss = onCloseDevicePicker,
+                    onSelectDevice = onSelectDevice,
+                )
             }
         }
 
         RightRail(
             onDisconnect = onDisconnect,
+            onLeftClick = engine::clickLeft,
             onRightClick = engine::clickRight,
             onMiddleClick = engine::clickMiddle,
-            onToggleHelp = { showHelp = !showHelp },
         )
     }
 }
 
 @Composable
-private fun LeftRail(state: ConnectionUiState, onLeftClick: () -> Unit) {
+private fun DevicePickerOverlay(
+    devices: List<PairedDevice>,
+    activeDeviceId: String,
+    onDismiss: () -> Unit,
+    onSelectDevice: (String) -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.72f))
+            .clickable(onClick = onDismiss)
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.72f)
+                .clip(RoundedCornerShape(14.dp))
+                .background(BgPanel)
+                .border(1.dp, BorderColor, RoundedCornerShape(14.dp))
+                .clickable(enabled = false) { }
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(text = "切换设备", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+            devices.forEach { device ->
+                val online = device.onlineState == DeviceOnlineState.Online
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (device.id == activeDeviceId) BgElevated else BgBase)
+                        .border(1.dp, BorderColor, RoundedCornerShape(10.dp))
+                        .clickable(enabled = online && device.id != activeDeviceId) {
+                            onSelectDevice(device.id)
+                        }
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = device.name,
+                        color = if (online) TextPrimary else TextMuted,
+                        fontSize = 14.sp,
+                    )
+                    Text(
+                        text = when {
+                            device.id == activeDeviceId -> "当前"
+                            online -> "切换"
+                            else -> "离线"
+                        },
+                        color = if (online) Accent else TextMuted,
+                        fontSize = 12.sp,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LeftRail(
+    state: ConnectionUiState,
+    onToggleHelp: () -> Unit,
+    onOpenDevicePicker: () -> Unit,
+) {
     Column(
         modifier = Modifier
             .width(RailWidth)
@@ -438,22 +464,28 @@ private fun LeftRail(state: ConnectionUiState, onLeftClick: () -> Unit) {
             fontWeight = FontWeight.Bold,
             fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
         )
-        Text(text = "ms", color = TextMuted, fontSize = 9.sp)
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        RailButton(label = "左", onClick = onLeftClick)
 
         Spacer(modifier = Modifier.weight(1f))
+
+        RailIconButton(
+            icon = Icons.Filled.SwapHoriz,
+            contentDescription = "切换设备",
+            onClick = onOpenDevicePicker,
+            accent = TextSecondary,
+        )
+
+        RailButton(label = "?", onClick = onToggleHelp, accent = TextSecondary)
+
+        Spacer(modifier = Modifier.height(12.dp))
     }
 }
 
 @Composable
 private fun RightRail(
     onDisconnect: () -> Unit,
+    onLeftClick: () -> Unit,
     onRightClick: () -> Unit,
     onMiddleClick: () -> Unit,
-    onToggleHelp: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -466,17 +498,45 @@ private fun RightRail(
     ) {
         Spacer(modifier = Modifier.height(12.dp))
 
-        RailButton(label = "断", onClick = onDisconnect, accent = ErrorColor)
+        RailIconButton(
+            icon = Icons.Filled.LinkOff,
+            contentDescription = "断开连接",
+            onClick = onDisconnect,
+            accent = ErrorColor,
+        )
 
-        RailButton(label = "右", onClick = onRightClick)
-
+        RailButton(label = "左", onClick = onLeftClick)
         RailButton(label = "中", onClick = onMiddleClick)
+        RailButton(label = "右", onClick = onRightClick)
 
         Spacer(modifier = Modifier.weight(1f))
 
-        RailButton(label = "?", onClick = onToggleHelp, accent = TextSecondary)
-
         Spacer(modifier = Modifier.height(12.dp))
+    }
+}
+
+@Composable
+private fun RailIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    accent: Color = Accent,
+) {
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(BgElevated)
+            .border(1.dp, BorderColor, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = accent,
+            modifier = Modifier.size(22.dp),
+        )
     }
 }
 
@@ -502,6 +562,20 @@ private fun RailButton(
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
         )
+    }
+}
+
+@Composable
+private fun ErrorBanner(message: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(ErrorColor.copy(alpha = 0.12f))
+            .border(1.dp, ErrorColor.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
+            .padding(12.dp),
+    ) {
+        Text(text = message, color = ErrorColor, fontSize = 13.sp, lineHeight = 18.sp)
     }
 }
 

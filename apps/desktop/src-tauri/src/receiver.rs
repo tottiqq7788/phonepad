@@ -9,14 +9,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use phonepad_protocol::{
-    ButtonAction, InputPacket, PacketKind, DISCOVERY_REQUEST, TCP_CONTROL_PORT, UDP_DISCOVERY_PORT,
-    UDP_INPUT_PORT,
+    auth_token, ButtonAction, InputPacket, PacketKind, DISCOVERY_REQUEST, TCP_CONTROL_PORT,
+    UDP_DISCOVERY_PORT, UDP_INPUT_PORT,
 };
 
-use crate::{input::InputController, pairing, settings::ReceiverSettings};
+use crate::{device_config::DeviceConfig, input::InputController, settings::ReceiverSettings};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +32,8 @@ pub struct ReceiverStatus {
     pub click_packets: u64,
     pub last_client: Option<String>,
     pub last_rtt_ms: Option<f64>,
+    pub device_id: String,
+    pub device_name: String,
 }
 
 impl Default for ReceiverStatus {
@@ -48,8 +50,19 @@ impl Default for ReceiverStatus {
             click_packets: 0,
             last_client: None,
             last_rtt_ms: None,
+            device_id: String::new(),
+            device_name: String::new(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlRequest {
+    #[serde(rename = "type")]
+    request_type: String,
+    device_id: String,
+    secret: String,
 }
 
 pub struct ReceiverHandle {
@@ -71,6 +84,7 @@ impl ReceiverHandle {
 pub fn start(
     app: AppHandle,
     settings: Arc<Mutex<ReceiverSettings>>,
+    device: Arc<Mutex<DeviceConfig>>,
 ) -> Result<ReceiverHandle, String> {
     let udp_socket = UdpSocket::bind(("0.0.0.0", UDP_INPUT_PORT)).map_err(|err| err.to_string())?;
     udp_socket
@@ -90,8 +104,11 @@ pub fn start(
         .map_err(|err| err.to_string())?;
 
     let shutdown = Arc::new(AtomicBool::new(false));
+    let device_snapshot = device.lock().unwrap().clone();
     let status = Arc::new(Mutex::new(ReceiverStatus {
         running: true,
+        device_id: device_snapshot.device_id,
+        device_name: device_snapshot.device_name,
         ..ReceiverStatus::default()
     }));
 
@@ -99,11 +116,12 @@ pub fn start(
         app.clone(),
         udp_socket,
         settings.clone(),
+        device.clone(),
         shutdown.clone(),
         status.clone(),
     );
-    spawn_discovery_loop(discovery_socket, shutdown.clone(), status.clone());
-    spawn_control_loop(app, tcp_listener, shutdown.clone(), status.clone());
+    spawn_discovery_loop(discovery_socket, device.clone(), shutdown.clone(), status.clone());
+    spawn_control_loop(app, tcp_listener, device, shutdown.clone(), status.clone());
 
     Ok(ReceiverHandle { shutdown, status })
 }
@@ -112,6 +130,7 @@ fn spawn_input_loop(
     app: AppHandle,
     socket: UdpSocket,
     settings: Arc<Mutex<ReceiverSettings>>,
+    device: Arc<Mutex<DeviceConfig>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) {
@@ -151,13 +170,22 @@ fn spawn_input_loop(
                 }
             };
 
+            let device_config = device.lock().unwrap().clone();
+            let expected_token = auth_token(&device_config.pairing_secret, packet.sequence);
+            if packet.auth_token != expected_token {
+                status.lock().unwrap().packets_dropped += 1;
+                continue;
+            }
+
             if last_peer != Some(peer) {
                 last_peer = Some(peer);
                 last_sequence = 0;
             }
 
-            if packet.sequence <= last_sequence && last_sequence.wrapping_sub(packet.sequence) < 10_000 {
-                if packet.sequence <= 32 && last_sequence > 1_000 {
+            if packet.sequence <= last_sequence
+                && last_sequence.wrapping_sub(packet.sequence) < 10_000
+            {
+                if packet.sequence <= 32 && last_sequence > 32 {
                     last_sequence = 0;
                 } else {
                     status.lock().unwrap().packets_dropped += 1;
@@ -175,6 +203,7 @@ fn spawn_input_loop(
                 snapshot.packets_received += 1;
                 snapshot.last_client = Some(peer.to_string());
                 snapshot.last_rtt_ms = estimate_rtt(packet.timestamp_micros);
+                snapshot.device_name = device_config.device_name.clone();
                 match packet.kind {
                     PacketKind::Move => snapshot.move_packets += 1,
                     PacketKind::Scroll => snapshot.scroll_packets += 1,
@@ -205,6 +234,7 @@ fn spawn_input_loop(
 
 fn spawn_discovery_loop(
     socket: UdpSocket,
+    device: Arc<Mutex<DeviceConfig>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) {
@@ -227,25 +257,27 @@ fn spawn_discovery_loop(
                 continue;
             }
 
-            let ip = pairing::discovery_response_ip(peer);
+            let ip = crate::pairing::discovery_response_ip(peer);
             if ip.is_empty() {
                 continue;
             }
+            let device_config = device.lock().unwrap();
             let payload = serde_json::json!({
-                "name": "PhonePad Receiver",
+                "name": device_config.device_name,
                 "ip": ip,
                 "udpPort": UDP_INPUT_PORT,
                 "tcpPort": TCP_CONTROL_PORT,
                 "discoveryPort": UDP_DISCOVERY_PORT,
                 "running": status.lock().unwrap().running,
+                "deviceId": device_config.device_id,
             });
             let _ = socket.send_to(payload.to_string().as_bytes(), peer);
         }
     });
 }
 
-fn read_hello_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
-    let mut buf = [0u8; 32];
+fn read_control_request(stream: &mut std::net::TcpStream) -> std::io::Result<String> {
+    let mut buf = [0u8; 512];
     let mut total = 0usize;
     loop {
         match stream.read(&mut buf[total..]) {
@@ -265,12 +297,13 @@ fn read_hello_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
             Err(err) => return Err(err),
         }
     }
-    Ok(())
+    Ok(String::from_utf8_lossy(&buf[..total]).trim().to_string())
 }
 
 fn spawn_control_loop(
     app: AppHandle,
     listener: TcpListener,
+    device: Arc<Mutex<DeviceConfig>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) {
@@ -279,8 +312,26 @@ fn spawn_control_loop(
             match listener.accept() {
                 Ok((mut stream, peer)) => {
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
-                    let _ = read_hello_request(&mut stream);
-                    let snapshot = status.lock().unwrap().clone();
+                    let request_text = read_control_request(&mut stream).unwrap_or_default();
+                    let request = match serde_json::from_str::<ControlRequest>(&request_text) {
+                        Ok(request) => request,
+                        Err(_) => continue,
+                    };
+                    if request.request_type != "status" {
+                        continue;
+                    }
+
+                    let device_config = device.lock().unwrap().clone();
+                    if !device_config.validate_secret(&request.device_id, &request.secret) {
+                        continue;
+                    }
+
+                    let snapshot = {
+                        let mut snapshot = status.lock().unwrap().clone();
+                        snapshot.device_id = device_config.device_id.clone();
+                        snapshot.device_name = device_config.device_name.clone();
+                        snapshot
+                    };
                     let payload = serde_json::to_vec(&snapshot).unwrap_or_default();
                     let _ = stream.write_all(&payload);
                     status.lock().unwrap().last_client = Some(peer.to_string());
@@ -303,4 +354,21 @@ fn estimate_rtt(timestamp_micros: u64) -> Option<f64> {
         return None;
     }
     Some((now - timestamp_micros) as f64 / 1000.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device_config::DeviceConfig;
+
+    #[test]
+    fn rejects_invalid_control_request_secret() {
+        let device = DeviceConfig {
+            device_id: "dev-1".into(),
+            device_name: "PC".into(),
+            pairing_secret: "secret".into(),
+        };
+        assert!(!device.validate_secret("dev-1", "wrong"));
+        assert!(device.validate_secret("dev-1", "secret"));
+    }
 }

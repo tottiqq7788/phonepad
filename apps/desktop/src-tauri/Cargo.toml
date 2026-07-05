@@ -1,6 +1,6 @@
 [package]
 name = "phonepad-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "Low-latency desktop receiver for PhonePad."
 authors = ["PhonePad"]
 license = "MIT"
@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+hostname = "0.4"
+urlencoding = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 phonepad-protocol = { path = "../../../crates/protocol" }
 

@@ -4,6 +4,8 @@ use local_ip_address::list_afinet_netifas;
 use serde::Serialize;
 use phonepad_protocol::{TCP_CONTROL_PORT, UDP_DISCOVERY_PORT, UDP_INPUT_PORT};
 
+use crate::device_config::DeviceConfig;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PairingInfo {
@@ -14,9 +16,11 @@ pub struct PairingInfo {
     pub tcp_port: u16,
     pub discovery_port: u16,
     pub connection_url: String,
+    pub device_id: String,
+    pub device_name: String,
 }
 
-pub fn build_pairing_info(last_client: Option<&str>) -> PairingInfo {
+pub fn build_pairing_info(device: &DeviceConfig, last_client: Option<&str>) -> PairingInfo {
     let candidates = collect_ipv4_candidates();
     let recommended = select_recommended_ip(&candidates, last_client);
     let all_ips: Vec<String> = candidates.iter().map(|c| c.ip.to_string()).collect();
@@ -24,7 +28,12 @@ pub fn build_pairing_info(last_client: Option<&str>) -> PairingInfo {
     let connection_url = if recommended.is_empty() {
         String::new()
     } else {
-        format!("phonepad://{recommended}:{TCP_CONTROL_PORT}")
+        format!(
+            "phonepad://pair?host={recommended}&tcp={TCP_CONTROL_PORT}&udp={UDP_INPUT_PORT}&id={}&name={}&secret={}",
+            urlencoding::encode(&device.device_id),
+            urlencoding::encode(&device.device_name),
+            urlencoding::encode(&device.pairing_secret),
+        )
     };
 
     PairingInfo {
@@ -35,6 +44,8 @@ pub fn build_pairing_info(last_client: Option<&str>) -> PairingInfo {
         udp_port: UDP_INPUT_PORT,
         tcp_port: TCP_CONTROL_PORT,
         discovery_port: UDP_DISCOVERY_PORT,
+        device_id: device.device_id.clone(),
+        device_name: device.device_name.clone(),
     }
 }
 
@@ -145,6 +156,7 @@ fn is_likely_virtual(ip: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device_config::DeviceConfig;
 
     #[test]
     fn returns_empty_when_no_candidates() {
@@ -166,5 +178,22 @@ mod tests {
         ];
         let selected = select_recommended_ip(&candidates, None);
         assert_eq!(selected, "192.168.1.12");
+    }
+
+    #[test]
+    fn pairing_url_contains_device_identity() {
+        let device = DeviceConfig {
+            device_id: "dev-1".into(),
+            device_name: "My PC".into(),
+            pairing_secret: "secret123".into(),
+        };
+        let info = build_pairing_info(&device, None);
+        if info.connection_url.is_empty() {
+            assert!(info.recommended_ip.is_empty());
+        } else {
+            assert!(info.connection_url.contains("id=dev-1"));
+            assert!(info.connection_url.contains("secret=secret123"));
+            assert!(info.connection_url.contains("name=My"));
+        }
     }
 }

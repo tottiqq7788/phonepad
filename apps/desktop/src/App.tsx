@@ -15,6 +15,8 @@ type ReceiverStatus = {
   clickPackets: number;
   lastClient?: string;
   lastRttMs?: number;
+  deviceId?: string;
+  deviceName?: string;
 };
 
 type PairingInfo = {
@@ -25,6 +27,14 @@ type PairingInfo = {
   tcpPort: number;
   discoveryPort: number;
   connectionUrl: string;
+  deviceId: string;
+  deviceName: string;
+};
+
+type DeviceConfig = {
+  deviceId: string;
+  deviceName: string;
+  pairingSecret: string;
 };
 
 type Settings = {
@@ -44,6 +54,8 @@ const defaultSettings: Settings = {
 export default function App() {
   const [status, setStatus] = useState<ReceiverStatus | null>(null);
   const [pairing, setPairing] = useState<PairingInfo | null>(null);
+  const [device, setDevice] = useState<DeviceConfig | null>(null);
+  const [deviceNameDraft, setDeviceNameDraft] = useState("");
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +68,12 @@ export default function App() {
   async function refreshStatus() {
     const next = await invoke<ReceiverStatus>("receiver_status");
     setStatus(next);
+  }
+
+  async function refreshDevice() {
+    const next = await invoke<DeviceConfig>("device_info");
+    setDevice(next);
+    setDeviceNameDraft(next.deviceName);
   }
 
   async function refreshPairing() {
@@ -74,6 +92,18 @@ export default function App() {
       },
     });
     setQrDataUrl(dataUrl);
+  }
+
+  async function saveDeviceName() {
+    setError(null);
+    try {
+      const next = await invoke<DeviceConfig>("update_device_name", { name: deviceNameDraft });
+      setDevice(next);
+      setDeviceNameDraft(next.deviceName);
+      await refreshPairing();
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
   async function startReceiver() {
@@ -109,6 +139,7 @@ export default function App() {
 
   useEffect(() => {
     refreshStatus().catch((err) => setError(String(err)));
+    refreshDevice().catch((err) => setError(String(err)));
     refreshPairing().catch((err) => setError(String(err)));
     startReceiver().catch((err) => setError(String(err)));
 
@@ -138,7 +169,7 @@ export default function App() {
           <p className="console-header__title">PhonePad Receiver</p>
           <h1>低延迟手机触控板接收端</h1>
           <p className="console-header__subtitle">
-            监听 UDP 输入包，优先保证跟手。手机端可通过局域网发现、扫码或手动输入 IP 连接。
+            手机端请扫码配对此电脑。只有扫码获取密钥的设备才能连接和控制。
           </p>
         </div>
         <div className="header-actions">
@@ -162,6 +193,8 @@ export default function App() {
         <article className="panel">
           <h2>连接状态</h2>
           <dl className="meta-grid">
+            <dt>设备名称</dt>
+            <dd className="highlight">{device?.deviceName ?? pairing?.deviceName ?? "—"}</dd>
             <dt>推荐 IP</dt>
             <dd className="highlight">{displayIp}</dd>
             <dt>最近客户端</dt>
@@ -179,17 +212,26 @@ export default function App() {
 
         <article className="panel">
           <h2>配对</h2>
-          <p className="panel__desc">Android 端扫描二维码，或手动输入下方地址。</p>
+          <p className="panel__desc">Android 端扫描下方二维码完成配对并获取连接密钥。</p>
           <div className="pairing-panel">
             {qrDataUrl ? <img className="qr-image" src={qrDataUrl} alt="配对二维码" /> : null}
             <div className="pairing-details">
               <code className="pairing-code">{pairing?.connectionUrl || "未检测到可用网络，请检查 Wi-Fi 连接"}</code>
-              <p className="hint">推荐手动输入：{displayIp}</p>
-              {(pairing?.allIps?.length ?? 0) > 1 ? (
-                <p className="hint">检测到多个网卡，请优先选择与手机同网段的地址。</p>
-              ) : null}
+              <p className="hint">设备 ID：{pairing?.deviceId ?? device?.deviceId ?? "—"}</p>
             </div>
           </div>
+          <label className="slider-field">
+            编辑设备名称
+            <input
+              type="text"
+              value={deviceNameDraft}
+              maxLength={32}
+              onChange={(event) => setDeviceNameDraft(event.target.value)}
+            />
+            <button type="button" className="btn btn--primary" onClick={saveDeviceName}>
+              保存名称
+            </button>
+          </label>
         </article>
 
         <article className="panel">
@@ -262,7 +304,7 @@ export default function App() {
       <section className="notice">
         <strong>macOS：</strong>需在「系统设置 → 隐私与安全性 → 辅助功能」中允许本应用控制电脑。
         <br />
-        <strong>Windows：</strong>首次启动请允许 UDP 45454 / TCP 45455 / UDP 45456 通过防火墙。
+        <strong>Windows：</strong>首次启动请允许 UDP 45454 / TCP 45455 通过防火墙。
       </section>
     </main>
   );

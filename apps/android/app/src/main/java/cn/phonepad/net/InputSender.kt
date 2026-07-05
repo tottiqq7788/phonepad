@@ -19,16 +19,23 @@ class InputSender {
     }
     private val addressCache = ConcurrentHashMap<String, InetAddress>()
     @Volatile
-    private var closed = false
+    private var secret: String = ""
 
     init {
         socket.broadcast = true
     }
 
+    fun setSecret(value: String) {
+        secret = value
+        sequence.set(0)
+    }
+
     fun send(host: String, port: Int, packet: Protocol.InputPacket) {
-        val payload = packet.copy(sequence = sequence.incrementAndGet()).encode()
+        val nextSequence = sequence.incrementAndGet()
+        val authToken = Protocol.authToken(secret, nextSequence)
+        val payload = packet.copy(sequence = nextSequence, authToken = authToken).encode()
         executor.execute {
-            if (closed) return@execute
+            if (secret.isBlank()) return@execute
             runCatching {
                 val address = addressCache.getOrPut(host) { InetAddress.getByName(host) }
                 val datagram = DatagramPacket(payload, payload.size, address, port)
@@ -38,7 +45,6 @@ class InputSender {
     }
 
     fun close() {
-        closed = true
         socket.close()
         executor.shutdownNow()
     }

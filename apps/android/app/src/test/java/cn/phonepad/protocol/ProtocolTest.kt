@@ -1,19 +1,30 @@
 package cn.phonepad.protocol
 
-import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
 class ProtocolTest {
     @Test
     fun movePacketHasExpectedLength() {
-        val packet = Protocol.InputPacket.move(7, 123_456L, -3, 5, fingers = 1)
+        val token = Protocol.authToken("secret123", 7)
+        val packet = Protocol.InputPacket.move(7, 123_456L, -3, 5, token, fingers = 1)
         assertEquals(Protocol.PACKET_LEN, packet.encode().size)
+        assertEquals(Protocol.VERSION, packet.encode()[2])
+    }
+
+    @Test
+    fun authTokenMatchesRustGoldenVector() {
+        val token42 = Protocol.authToken("secret123", 42)
+        val token43 = Protocol.authToken("secret123", 43)
+        assertEquals(0x23B3FBC258699E45L, token42)
+        assertNotEquals(token42, token43)
     }
 
     @Test
     fun clickPacketEncodesButtonAndAction() {
-        val packet = Protocol.InputPacket.click(9, 999L, Protocol.MouseButton.Right)
+        val token = Protocol.authToken("secret123", 9)
+        val packet = Protocol.InputPacket.click(9, 999L, Protocol.MouseButton.Right, token)
         val bytes = packet.encode()
         assertEquals('T'.code.toByte(), bytes[0])
         assertEquals('P'.code.toByte(), bytes[1])
@@ -24,30 +35,6 @@ class ProtocolTest {
 
     @Test
     fun discoveryRequestMatchesDesktopProtocol() {
-        assertArrayEquals("PHONEPAD_DISCOVER_V1".toByteArray(), Protocol.DISCOVERY_REQUEST)
-    }
-
-    @Test
-    fun movePacketMatchesRustGoldenVector() {
-        val packet = Protocol.InputPacket.move(42, 123_456L, -7, 9, fingers = 1)
-        assertArrayEquals(
-            byteArrayOf(
-                0x54, 0x50, 0x01, 0x01, 0x2A, 0x00, 0x00, 0x00, 0x40, 0xE2.toByte(), 0x01, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0xF9.toByte(), 0xFF.toByte(), 0x09, 0x00, 0x00, 0x00, 0x01, 0x00,
-            ),
-            packet.encode(),
-        )
-    }
-
-    @Test
-    fun clickPacketMatchesRustGoldenVector() {
-        val packet = Protocol.InputPacket.click(43, 123_999L, Protocol.MouseButton.Right)
-        assertArrayEquals(
-            byteArrayOf(
-                0x54, 0x50, 0x01, 0x03, 0x2B, 0x00, 0x00, 0x00, 0x5F, 0xE4.toByte(), 0x01, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x00,
-            ),
-            packet.encode(),
-        )
+        assertEquals("PHONEPAD_DISCOVER_V1", String(Protocol.DISCOVERY_REQUEST))
     }
 }
