@@ -16,7 +16,12 @@ use phonepad_protocol::{
     UDP_DISCOVERY_PORT, UDP_INPUT_PORT,
 };
 
-use crate::{device_config::DeviceConfig, input::InputController, settings::ReceiverSettings};
+use crate::{
+    device_config::DeviceConfig,
+    focus::{self, FocusSnapshot},
+    input::{normalize_key_repeat, parse_key_action, InputController},
+    settings::ReceiverSettings,
+};
 
 pub const MAX_TEXT_CHARS: usize = 4096;
 pub const MAX_TEXT_BYTES: usize = 6000;
@@ -68,6 +73,8 @@ struct ControlRequest {
     device_id: String,
     secret: String,
     content: Option<String>,
+    action: Option<String>,
+    repeat: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -334,6 +341,8 @@ fn read_control_request(stream: &mut std::net::TcpStream) -> std::io::Result<(St
 fn write_control_response(stream: &mut std::net::TcpStream, response: &ControlResponse) {
     if let Ok(payload) = serde_json::to_vec(response) {
         let _ = stream.write_all(&payload);
+        let _ = stream.write_all(b"\n");
+        let _ = stream.flush();
     }
 }
 
@@ -364,6 +373,195 @@ fn handle_text_request(
     }
 }
 
+fn handle_key_request(
+    input: &mut InputController,
+    action: Option<String>,
+    repeat: Option<u32>,
+) -> ControlResponse {
+    let action_name = action.unwrap_or_default();
+    if action_name.is_empty() {
+        return ControlResponse {
+            ok: false,
+            error: Some("缺少 action".into()),
+        };
+    }
+
+    let key = match parse_key_action(&action_name) {
+        Ok(key) => key,
+        Err(error) => {
+            return ControlResponse {
+                ok: false,
+                error: Some(error),
+            };
+        }
+    };
+
+    let repeat_count = normalize_key_repeat(repeat);
+    match input.press_key(key, repeat_count) {
+        Ok(()) => ControlResponse {
+            ok: true,
+            error: None,
+        },
+        Err(error) => ControlResponse {
+            ok: false,
+            error: Some(error),
+        },
+    }
+}
+
+fn handle_focus_subscribe(
+    stream: &mut std::net::TcpStream,
+    shutdown: Arc<AtomicBool>,
+) {
+    write_control_response(
+        stream,
+        &ControlResponse {
+            ok: true,
+            error: None,
+        },
+    );
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+
+    let mut detector = focus::create_detector();
+    let mut last = FocusSnapshot::default();
+    let mut probe = [0u8; 1];
+
+    while !shutdown.load(Ordering::Relaxed) {
+        match stream.read(&mut probe) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => break,
+        }
+
+        let snap = detector.snapshot();
+        if snap != last {
+            let payload = serde_json::json!({
+                "type": "focusState",
+                "editable": snap.editable,
+                "appName": snap.app_name,
+            });
+            let line = format!("{payload}\n");
+            if stream.write_all(line.as_bytes()).is_err() {
+                break;
+            }
+            let _ = stream.flush();
+            last = snap;
+        }
+    }
+}
+
+fn handle_control_connection(
+    mut stream: std::net::TcpStream,
+    peer: SocketAddr,
+    app: AppHandle,
+    device: Arc<Mutex<DeviceConfig>>,
+    shutdown: Arc<AtomicBool>,
+    status: Arc<Mutex<ReceiverStatus>>,
+) {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let (request_text, oversize) = read_control_request(&mut stream).unwrap_or_default();
+    if oversize {
+        write_control_response(
+            &mut stream,
+            &ControlResponse {
+                ok: false,
+                error: Some("请求体过大".into()),
+            },
+        );
+        return;
+    }
+    if request_text.is_empty() {
+        return;
+    }
+    let request = match serde_json::from_str::<ControlRequest>(&request_text) {
+        Ok(request) => request,
+        Err(_) => {
+            write_control_response(
+                &mut stream,
+                &ControlResponse {
+                    ok: false,
+                    error: Some("请求格式错误".into()),
+                },
+            );
+            return;
+        }
+    };
+
+    let device_config = device.lock().unwrap().clone();
+    if !device_config.validate_secret(&request.device_id, &request.secret) {
+        if request.request_type == "text"
+            || request.request_type == "key"
+            || request.request_type == "focusSubscribe"
+        {
+            write_auth_failure(&mut stream);
+        }
+        return;
+    }
+
+    match request.request_type.as_str() {
+        "status" => {
+            let snapshot = {
+                let mut snapshot = status.lock().unwrap().clone();
+                snapshot.device_id = device_config.device_id.clone();
+                snapshot.device_name = device_config.device_name.clone();
+                snapshot
+            };
+            let payload = serde_json::to_vec(&snapshot).unwrap_or_default();
+            let _ = stream.write_all(&payload);
+            status.lock().unwrap().last_client = Some(peer.to_string());
+            let _ = app.emit("receiver://status", snapshot);
+        }
+        "text" => {
+            let mut input = InputController::new().ok();
+            let response = match input.as_mut() {
+                Some(controller) => handle_text_request(controller, request.content),
+                None => ControlResponse {
+                    ok: false,
+                    error: Some("无法初始化输入控制器".into()),
+                },
+            };
+            let succeeded = response.ok;
+            write_control_response(&mut stream, &response);
+            if succeeded {
+                status.lock().unwrap().last_client = Some(peer.to_string());
+            }
+        }
+        "key" => {
+            let mut input = InputController::new().ok();
+            let response = match input.as_mut() {
+                Some(controller) => {
+                    handle_key_request(controller, request.action, request.repeat)
+                }
+                None => ControlResponse {
+                    ok: false,
+                    error: Some("无法初始化输入控制器".into()),
+                },
+            };
+            let succeeded = response.ok;
+            write_control_response(&mut stream, &response);
+            if succeeded {
+                status.lock().unwrap().last_client = Some(peer.to_string());
+            }
+        }
+        "focusSubscribe" => handle_focus_subscribe(&mut stream, shutdown),
+        _ => {}
+    }
+}
+
+fn write_auth_failure(stream: &mut std::net::TcpStream) {
+    write_control_response(
+        stream,
+        &ControlResponse {
+            ok: false,
+            error: Some("认证失败".into()),
+        },
+    );
+}
+
 fn spawn_control_loop(
     app: AppHandle,
     listener: TcpListener,
@@ -372,80 +570,16 @@ fn spawn_control_loop(
     status: Arc<Mutex<ReceiverStatus>>,
 ) {
     thread::spawn(move || {
-        let mut input = InputController::new().ok();
-
         while !shutdown.load(Ordering::Relaxed) {
             match listener.accept() {
-                Ok((mut stream, peer)) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                    let (request_text, oversize) =
-                        read_control_request(&mut stream).unwrap_or_default();
-                    if oversize {
-                        write_control_response(
-                            &mut stream,
-                            &ControlResponse {
-                                ok: false,
-                                error: Some("请求体过大".into()),
-                            },
-                        );
-                        continue;
-                    }
-                    if request_text.is_empty() {
-                        continue;
-                    }
-                    let request = match serde_json::from_str::<ControlRequest>(&request_text) {
-                        Ok(request) => request,
-                        Err(_) => continue,
-                    };
-
-                    let device_config = device.lock().unwrap().clone();
-                    if !device_config.validate_secret(&request.device_id, &request.secret) {
-                        if request.request_type == "text" {
-                            write_control_response(
-                                &mut stream,
-                                &ControlResponse {
-                                    ok: false,
-                                    error: Some("认证失败".into()),
-                                },
-                            );
-                        }
-                        continue;
-                    }
-
-                    match request.request_type.as_str() {
-                        "status" => {
-                            let snapshot = {
-                                let mut snapshot = status.lock().unwrap().clone();
-                                snapshot.device_id = device_config.device_id.clone();
-                                snapshot.device_name = device_config.device_name.clone();
-                                snapshot
-                            };
-                            let payload = serde_json::to_vec(&snapshot).unwrap_or_default();
-                            let _ = stream.write_all(&payload);
-                            status.lock().unwrap().last_client = Some(peer.to_string());
-                            let _ = app.emit("receiver://status", snapshot);
-                        }
-                        "text" => {
-                            if input.is_none() {
-                                input = InputController::new().ok();
-                            }
-                            let response = match input.as_mut() {
-                                Some(controller) => {
-                                    handle_text_request(controller, request.content)
-                                }
-                                None => ControlResponse {
-                                    ok: false,
-                                    error: Some("无法初始化输入控制器".into()),
-                                },
-                            };
-                            let succeeded = response.ok;
-                            write_control_response(&mut stream, &response);
-                            if succeeded {
-                                status.lock().unwrap().last_client = Some(peer.to_string());
-                            }
-                        }
-                        _ => {}
-                    }
+                Ok((stream, peer)) => {
+                    let app = app.clone();
+                    let device = device.clone();
+                    let shutdown = shutdown.clone();
+                    let status = status.clone();
+                    thread::spawn(move || {
+                        handle_control_connection(stream, peer, app, device, shutdown, status);
+                    });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(80));
@@ -520,5 +654,59 @@ mod tests {
         let request: ControlRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.request_type, "text");
         assert_eq!(request.content.as_deref(), Some("你好"));
+    }
+
+    #[test]
+    fn parses_key_control_request() {
+        let json = r#"{"type":"key","deviceId":"dev-1","secret":"secret","action":"backspace"}"#;
+        let request: ControlRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.request_type, "key");
+        assert_eq!(request.action.as_deref(), Some("backspace"));
+    }
+
+    #[test]
+    fn parses_supported_key_actions() {
+        use crate::input::parse_key_action;
+        use enigo::Key;
+
+        assert!(matches!(parse_key_action("backspace"), Ok(Key::Backspace)));
+        assert!(matches!(parse_key_action("delete"), Ok(Key::Delete)));
+        assert!(matches!(parse_key_action("cursor_left"), Ok(Key::LeftArrow)));
+        assert!(matches!(parse_key_action("cursor_right"), Ok(Key::RightArrow)));
+    }
+
+    #[test]
+    fn parses_key_control_request_with_repeat() {
+        let json = r#"{"type":"key","deviceId":"dev-1","secret":"secret","action":"cursor_left","repeat":5}"#;
+        let request: ControlRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.repeat, Some(5));
+    }
+
+    #[test]
+    fn key_repeat_is_clamped() {
+        use crate::input::{normalize_key_repeat, MAX_KEY_REPEAT};
+        assert_eq!(normalize_key_repeat(None), 1);
+        assert_eq!(normalize_key_repeat(Some(0)), 1);
+        assert_eq!(normalize_key_repeat(Some(5)), 5);
+        assert_eq!(normalize_key_repeat(Some(999)), MAX_KEY_REPEAT);
+    }
+
+    #[test]
+    fn parses_focus_subscribe_request() {
+        let json = r#"{"type":"focusSubscribe","deviceId":"dev-1","secret":"secret"}"#;
+        let request: ControlRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.request_type, "focusSubscribe");
+    }
+
+    #[test]
+    fn focus_state_json_format() {
+        let payload = serde_json::json!({
+            "type": "focusState",
+            "editable": true,
+            "appName": "Notepad",
+        });
+        let text = payload.to_string();
+        assert!(text.contains("focusState"));
+        assert!(text.contains("editable"));
     }
 }

@@ -1,4 +1,5 @@
 mod device_config;
+mod focus;
 mod input;
 mod pairing;
 mod receiver;

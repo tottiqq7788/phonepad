@@ -1,4 +1,4 @@
-use enigo::{Axis, Button, Coordinate, Direction, Enigo, Keyboard, Mouse, Settings};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use phonepad_protocol::{ButtonAction, MouseButton};
 
 use crate::settings::ReceiverSettings;
@@ -72,6 +72,31 @@ impl InputController {
             return Ok(());
         }
         self.enigo.text(text).map_err(|err| err.to_string())
+    }
+
+    pub fn press_key(&mut self, key: Key, repeat: u32) -> Result<(), String> {
+        for _ in 0..repeat {
+            self.enigo
+                .key(key, Direction::Click)
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+pub const MAX_KEY_REPEAT: u32 = 20;
+
+pub fn normalize_key_repeat(repeat: Option<u32>) -> u32 {
+    repeat.unwrap_or(1).clamp(1, MAX_KEY_REPEAT)
+}
+
+pub fn parse_key_action(action: &str) -> Result<Key, String> {
+    match action {
+        "backspace" => Ok(Key::Backspace),
+        "delete" => Ok(Key::Delete),
+        "cursor_left" | "left" => Ok(Key::LeftArrow),
+        "cursor_right" | "right" => Ok(Key::RightArrow),
+        _ => Err(format!("未知按键动作: {action}")),
     }
 }
 

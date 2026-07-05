@@ -1,6 +1,6 @@
 [package]
 name = "phonepad-desktop"
-version = "0.4.0"
+version = "0.5.0"
 description = "Low-latency desktop receiver for PhonePad."
 authors = ["PhonePad"]
 license = "MIT"
@@ -22,6 +22,20 @@ hostname = "0.4"
 urlencoding = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 phonepad-protocol = { path = "../../../crates/protocol" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

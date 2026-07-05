@@ -2,7 +2,6 @@ package cn.phonepad.net
 
 import org.json.JSONObject
 import java.io.InputStream
-import java.net.SocketTimeoutException
 
 object TcpStatusReader {
     fun readJson(input: InputStream): String? {
@@ -12,7 +11,7 @@ object TcpStatusReader {
         while (true) {
             val read = try {
                 input.read(buffer)
-            } catch (_: SocketTimeoutException) {
+            } catch (_: java.net.SocketTimeoutException) {
                 break
             }
             if (read <= 0) break

@@ -11,11 +11,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -28,8 +30,10 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.CameraAlt
-import androidx.compose.material.icons.filled.KeyboardVoice
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Button
@@ -40,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -55,6 +60,7 @@ import androidx.compose.ui.input.pointer.changedToDown
 import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -67,6 +73,7 @@ import cn.phonepad.ConnectionManager
 import cn.phonepad.ConnectionUiState
 import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
+import cn.phonepad.net.TextInputKeyAction
 import cn.phonepad.touch.TouchpadEngine
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
@@ -107,7 +114,9 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             onCloseDevicePicker = connectionManager::closeDevicePicker,
             onSelectDevice = connectionManager::connectToDevice,
             onSendText = connectionManager::sendTextToActiveDevice,
+            onKeyAction = connectionManager::sendKeyActionToActiveDevice,
             onClearTextInputError = connectionManager::clearTextInputError,
+            onSuppressAutoInput = connectionManager::suppressAutoInput,
         )
     } else {
         DeviceHomeScreen(
@@ -301,13 +310,28 @@ private fun TouchpadScreen(
     onCloseDevicePicker: () -> Unit,
     onSelectDevice: (String) -> Unit,
     onSendText: (String, () -> Unit) -> Unit,
+    onKeyAction: (String, Int) -> Unit,
     onClearTextInputError: () -> Unit,
+    onSuppressAutoInput: () -> Unit,
 ) {
     var showHelp by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
+    var dismissedAtSignal by remember { mutableLongStateOf(0L) }
+
+    LaunchedEffect(state.autoTextInputSignal) {
+        val signal = state.autoTextInputSignal
+        if (signal > 0 && !showTextInput && signal > dismissedAtSignal) {
+            showHelp = false
+            onCloseDevicePicker()
+            onClearTextInputError()
+            showTextInput = true
+        }
+    }
 
     fun closeTextInput() {
         if (state.textSending) return
+        dismissedAtSignal = state.autoTextInputSignal
+        onSuppressAutoInput()
         onClearTextInputError()
         showTextInput = false
     }
@@ -348,11 +372,8 @@ private fun TouchpadScreen(
                     sending = state.textSending,
                     error = state.textInputError,
                     onBack = ::closeTextInput,
-                    onSend = { text ->
-                        onSendText(text) {
-                            closeTextInput()
-                        }
-                    },
+                    onSend = onSendText,
+                    onKeyAction = onKeyAction,
                 )
             } else {
                 Box(
@@ -435,7 +456,8 @@ private fun TextInputScreen(
     sending: Boolean,
     error: String?,
     onBack: () -> Unit,
-    onSend: (String) -> Unit,
+    onSend: (String, () -> Unit) -> Unit,
+    onKeyAction: (String, Int) -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
     val focusRequester = remember { FocusRequester() }
@@ -450,6 +472,15 @@ private fun TextInputScreen(
         if (sending) return
         keyboardController?.hide()
         onBack()
+    }
+
+    fun submitDraft() {
+        if (draft.trim().isEmpty() || sending) return
+        onSend(draft) {
+            draft = ""
+            focusRequester.requestFocus()
+            keyboardController?.show()
+        }
     }
 
     Column(
@@ -472,64 +503,39 @@ private fun TextInputScreen(
                 )
             }
             Text(
-                text = "语音 / 文本输入",
+                text = "输入模式",
                 color = TextPrimary,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-        }
-
-        Text(
-            text = "请先把电脑光标放到目标输入框，可使用手机输入法的语音输入",
-            color = TextMuted,
-            fontSize = 12.sp,
-            lineHeight = 18.sp,
-        )
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            BasicTextField(
-                value = draft,
-                onValueChange = { draft = it },
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxHeight()
-                    .focusRequester(focusRequester)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(BgPanel)
-                    .border(1.dp, BorderColor, RoundedCornerShape(12.dp))
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                textStyle = TextStyle(
-                    color = TextPrimary,
-                    fontSize = 16.sp,
-                    lineHeight = 24.sp,
-                ),
-                cursorBrush = SolidColor(Accent),
-                decorationBox = { innerTextField ->
-                    Box {
-                        if (draft.isEmpty()) {
-                            Text(
-                                text = "输入要发送到电脑的内容…",
-                                color = TextMuted,
-                                fontSize = 16.sp,
-                            )
-                        }
-                        innerTextField()
-                    }
-                },
-            )
-
+            IconButton(
+                onClick = { onKeyAction(TextInputKeyAction.BACKSPACE, 1) },
+                enabled = !sending,
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.Backspace,
+                    contentDescription = "退格",
+                    tint = if (!sending) Accent else TextMuted,
+                )
+            }
+            IconButton(
+                onClick = { onKeyAction(TextInputKeyAction.DELETE, 1) },
+                enabled = !sending,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Delete,
+                    contentDescription = "删除",
+                    tint = if (!sending) Accent else TextMuted,
+                )
+            }
             Button(
-                onClick = { onSend(draft) },
+                onClick = ::submitDraft,
                 enabled = draft.trim().isNotEmpty() && !sending,
-                modifier = Modifier
-                    .height(52.dp)
-                    .width(96.dp),
+                modifier = Modifier.height(40.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Accent,
                     contentColor = Color.White,
@@ -540,14 +546,124 @@ private fun TextInputScreen(
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.Send,
                     contentDescription = null,
-                    modifier = Modifier.size(18.dp),
+                    modifier = Modifier.size(16.dp),
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(text = if (sending) "发送中" else "发送", fontSize = 14.sp)
+                Text(text = if (sending) "发送中" else "发送", fontSize = 13.sp)
             }
         }
 
+        Text(
+            text = "请先把电脑光标放到目标输入框，可使用手机输入法的语音输入",
+            color = TextMuted,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+        )
+
+        BasicTextField(
+            value = draft,
+            onValueChange = { draft = it },
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .focusRequester(focusRequester)
+                .clip(RoundedCornerShape(12.dp))
+                .background(BgPanel)
+                .border(1.dp, BorderColor, RoundedCornerShape(12.dp))
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            textStyle = TextStyle(
+                color = TextPrimary,
+                fontSize = 16.sp,
+                lineHeight = 24.sp,
+            ),
+            cursorBrush = SolidColor(Accent),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (draft.isEmpty()) {
+                        Text(
+                            text = "输入要发送到电脑的内容…",
+                            color = TextMuted,
+                            fontSize = 16.sp,
+                        )
+                    }
+                    innerTextField()
+                }
+            },
+        )
+
+        CursorSwipeBar(
+            enabled = !sending,
+            onMoveLeft = { repeat -> onKeyAction(TextInputKeyAction.CURSOR_LEFT, repeat) },
+            onMoveRight = { repeat -> onKeyAction(TextInputKeyAction.CURSOR_RIGHT, repeat) },
+        )
+
         error?.let { ErrorBanner(it) }
+    }
+}
+
+@Composable
+private fun CursorSwipeBar(
+    enabled: Boolean,
+    onMoveLeft: (Int) -> Unit,
+    onMoveRight: (Int) -> Unit,
+) {
+    val thresholdPx = with(LocalDensity.current) { 28.dp.toPx() }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(BgElevated)
+            .border(1.dp, BorderColor, RoundedCornerShape(12.dp))
+            .then(
+                if (enabled) {
+                    Modifier.pointerInput(thresholdPx) {
+                        var accumulated = 0f
+                        var lastDragAt = 0L
+                        detectHorizontalDragGestures(
+                            onDragEnd = {
+                                accumulated = 0f
+                                lastDragAt = 0L
+                            },
+                            onDragCancel = {
+                                accumulated = 0f
+                                lastDragAt = 0L
+                            },
+                            onHorizontalDrag = { _, dragAmount ->
+                                val now = System.currentTimeMillis()
+                                val deltaMs = if (lastDragAt == 0L) 16L else (now - lastDragAt).coerceAtLeast(1L)
+                                lastDragAt = now
+                                val speed = kotlin.math.abs(dragAmount / deltaMs.toFloat())
+                                val multiplier = when {
+                                    speed >= 2.5f -> 8
+                                    speed >= 1.5f -> 4
+                                    speed >= 0.8f -> 2
+                                    else -> 1
+                                }
+                                accumulated += dragAmount
+                                while (accumulated >= thresholdPx) {
+                                    onMoveRight(multiplier)
+                                    accumulated -= thresholdPx
+                                }
+                                while (accumulated <= -thresholdPx) {
+                                    onMoveLeft(multiplier)
+                                    accumulated += thresholdPx
+                                }
+                            },
+                        )
+                    }
+                } else {
+                    Modifier
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "← 左右滑动移动光标 →",
+            color = if (enabled) TextSecondary else TextMuted,
+            fontSize = 13.sp,
+        )
     }
 }
 
@@ -693,8 +809,8 @@ private fun RightRail(
         Spacer(modifier = Modifier.weight(1f))
 
         RailIconButton(
-            icon = Icons.Filled.KeyboardVoice,
-            contentDescription = "语音输入",
+            icon = Icons.Filled.Edit,
+            contentDescription = "编辑输入",
             onClick = onOpenTextInput,
             accent = Accent,
         )
