@@ -21,8 +21,14 @@ pub fn build_pairing_info(last_client: Option<&str>) -> PairingInfo {
     let recommended = select_recommended_ip(&candidates, last_client);
     let all_ips: Vec<String> = candidates.iter().map(|c| c.ip.to_string()).collect();
 
+    let connection_url = if recommended.is_empty() {
+        String::new()
+    } else {
+        format!("phonepad://{recommended}:{TCP_CONTROL_PORT}")
+    };
+
     PairingInfo {
-        connection_url: format!("phonepad://{recommended}:{TCP_CONTROL_PORT}"),
+        connection_url,
         local_ip: recommended.clone(),
         recommended_ip: recommended,
         all_ips,
@@ -75,7 +81,18 @@ fn select_recommended_ip(candidates: &[IpCandidate], last_client: Option<&str>) 
         .iter()
         .max_by_key(|c| c.score)
         .map(|c| c.ip.to_string())
-        .unwrap_or_else(|| "127.0.0.1".into())
+        .unwrap_or_default()
+}
+
+pub fn discovery_response_ip(peer: SocketAddr) -> String {
+    if let IpAddr::V4(peer_v4) = peer.ip() {
+        if let Some(local) = local_ip_for_peer(peer_v4) {
+            return local.to_string();
+        }
+    }
+
+    let candidates = collect_ipv4_candidates();
+    select_recommended_ip(&candidates, None)
 }
 
 fn local_ip_for_peer(peer: Ipv4Addr) -> Option<Ipv4Addr> {
@@ -128,6 +145,12 @@ fn is_likely_virtual(ip: Ipv4Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn returns_empty_when_no_candidates() {
+        let selected = select_recommended_ip(&[], None);
+        assert_eq!(selected, "");
+    }
 
     #[test]
     fn prefers_rfc1918_over_virtual() {

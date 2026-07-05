@@ -139,11 +139,10 @@ class DiscoveryClient(private val context: Context) {
         return runCatching {
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(host, Protocol.TCP_CONTROL_PORT), 600)
+                socket.soTimeout = 600
                 socket.getOutputStream().write("HELLO\n".toByteArray())
-                val buffer = ByteArray(1024)
-                val read = socket.getInputStream().read(buffer)
-                if (read <= 0) return null
-                val json = JSONObject(String(buffer, 0, read, Charsets.UTF_8))
+                val jsonText = TcpStatusReader.readJson(socket.getInputStream()) ?: return null
+                val json = JSONObject(jsonText)
                 if (!json.optBoolean("running")) return null
                 DiscoveredReceiver(
                     name = "PhonePad Receiver",
@@ -165,21 +164,9 @@ class DiscoveryClient(private val context: Context) {
             .firstOrNull { address ->
                 !address.isLoopbackAddress &&
                     address.hostAddress?.contains(':') == false &&
-                    isLikelyLan(address.hostAddress ?: "")
+                    LanAddress.isLikelyLan(address.hostAddress ?: "")
             }
             ?.hostAddress
-    }
-
-    private fun isLikelyLan(ip: String): Boolean {
-        return ip.startsWith("192.168.") ||
-            ip.startsWith("10.") ||
-            ip.startsWith("172.16.") ||
-            ip.startsWith("172.17.") ||
-            ip.startsWith("172.18.") ||
-            ip.startsWith("172.19.") ||
-            ip.startsWith("172.2") ||
-            ip.startsWith("172.30.") ||
-            ip.startsWith("172.31.")
     }
 
     private fun parse(payload: String): DiscoveredReceiver? {
@@ -192,7 +179,7 @@ class DiscoveryClient(private val context: Context) {
                 tcpPort = json.optInt("tcpPort", Protocol.TCP_CONTROL_PORT),
                 discoveryPort = json.optInt("discoveryPort", Protocol.UDP_DISCOVERY_PORT),
                 running = json.optBoolean("running", true),
-            ).takeIf { it.ip.isNotBlank() && isLikelyLan(it.ip) }
+            ).takeIf { it.ip.isNotBlank() && LanAddress.isLikelyLan(it.ip) }
         } catch (_: Exception) {
             null
         }

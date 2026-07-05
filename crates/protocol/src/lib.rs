@@ -198,9 +198,26 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_click_packet() {
+    fn move_packet_matches_android_golden_vector() {
+        let packet = InputPacket::movement(PacketKind::Move, 42, 123_456, -7, 9, 1);
+        assert_eq!(
+            packet.encode(),
+            [
+                0x54, 0x50, 0x01, 0x01, 0x2A, 0x00, 0x00, 0x00, 0x40, 0xE2, 0x01, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0xF9, 0xFF, 0x09, 0x00, 0x00, 0x00, 0x01, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn click_packet_matches_android_golden_vector() {
         let packet = InputPacket::click(43, 123_999, MouseButton::Right);
-        let decoded = InputPacket::decode(&packet.encode()).unwrap();
-        assert_eq!(decoded, packet);
+        assert_eq!(
+            packet.encode(),
+            [
+                0x54, 0x50, 0x01, 0x03, 0x2B, 0x00, 0x00, 0x00, 0x5F, 0xE4, 0x01, 0x00, 0x00,
+                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x03, 0x00, 0x00,
+            ]
+        );
     }
 }

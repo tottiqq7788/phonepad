@@ -9,6 +9,7 @@ import cn.phonepad.net.ControlClient
 import cn.phonepad.net.DiscoveredReceiver
 import cn.phonepad.net.DiscoveryClient
 import cn.phonepad.net.InputSender
+import cn.phonepad.net.PairingUrlParser
 import cn.phonepad.touch.ReceiverTarget
 import cn.phonepad.touch.TouchpadEngine
 import kotlinx.coroutines.CoroutineScope
@@ -54,24 +55,49 @@ class ConnectionManager(
     fun discover() {
         scope.launch {
             uiState = uiState.copy(discovering = true, error = null, discoveryStage = "开始搜索...")
-            val lastHost = prefs.getString("last_host", null)
-            val receivers = discoveryClient.discover(lastHost = lastHost) { progress ->
+            try {
+                val lastHost = prefs.getString("last_host", null)
+                val receivers = discoveryClient.discover(lastHost = lastHost) { progress ->
+                    uiState = uiState.copy(
+                        discoveryStage = progress.stage,
+                        discovered = progress.found,
+                    )
+                }
                 uiState = uiState.copy(
-                    discoveryStage = progress.stage,
-                    discovered = progress.found,
+                    discovering = false,
+                    discovered = receivers,
+                    discoveryStage = if (receivers.isEmpty()) "未找到接收端，请扫码或手动输入 IP" else "找到 ${receivers.size} 个接收端",
+                )
+            } catch (e: Exception) {
+                uiState = uiState.copy(
+                    discovering = false,
+                    error = "搜索失败：${e.message ?: "未知错误"}",
+                    discoveryStage = "搜索失败",
                 )
             }
-            uiState = uiState.copy(
-                discovering = false,
-                discovered = receivers,
-                discoveryStage = if (receivers.isEmpty()) "未找到接收端，请扫码或手动输入 IP" else "找到 ${receivers.size} 个接收端",
-            )
         }
     }
 
     fun connect(host: String) {
         scope.launch {
-            val parsedHost = cn.phonepad.net.PairingUrlParser.parseHost(host) ?: host.trim()
+            val trimmed = host.trim()
+            if (trimmed.isEmpty()) {
+                uiState = uiState.copy(error = "请输入电脑 IP 或扫描配对二维码。")
+                return@launch
+            }
+
+            val parsedHost = PairingUrlParser.parseHost(trimmed)
+                ?: trimmed.takeIf { IPV4_PATTERN.matches(it) }
+
+            if (parsedHost.isNullOrBlank()) {
+                uiState = uiState.copy(
+                    connected = false,
+                    error = "无法识别连接地址，请扫描 PhonePad 二维码或输入电脑 IP。",
+                )
+                haptics.disconnected()
+                return@launch
+            }
+
             uiState = uiState.copy(error = null, host = parsedHost)
             val status = controlClient.fetchStatus(parsedHost)
             if (status == null || !status.running) {
@@ -130,5 +156,9 @@ class ConnectionManager(
     fun release() {
         monitorJob?.cancel()
         inputSender.close()
+    }
+
+    companion object {
+        private val IPV4_PATTERN = Regex("""^\d{1,3}(\.\d{1,3}){3}$""")
     }
 }

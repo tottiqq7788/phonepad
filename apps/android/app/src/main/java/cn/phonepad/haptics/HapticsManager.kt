@@ -20,6 +20,8 @@ class HapticsManager(context: Context) {
 
     fun rightClick() = pulse(28, 140)
 
+    fun middleClick() = pulse(22, 110)
+
     fun connected() = pulse(12, 60)
 
     fun disconnected() = pulse(40, 180)

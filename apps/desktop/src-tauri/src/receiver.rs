@@ -16,7 +16,7 @@ use phonepad_protocol::{
     UDP_INPUT_PORT,
 };
 
-use crate::{input::InputController, settings::ReceiverSettings};
+use crate::{input::InputController, pairing, settings::ReceiverSettings};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -227,7 +227,10 @@ fn spawn_discovery_loop(
                 continue;
             }
 
-            let ip = local_ip_for_peer(peer);
+            let ip = pairing::discovery_response_ip(peer);
+            if ip.is_empty() {
+                continue;
+            }
             let payload = serde_json::json!({
                 "name": "PhonePad Receiver",
                 "ip": ip,
@@ -241,14 +244,28 @@ fn spawn_discovery_loop(
     });
 }
 
-fn local_ip_for_peer(peer: std::net::SocketAddr) -> String {
-    UdpSocket::bind(("0.0.0.0", 0))
-        .and_then(|socket| {
-            socket.connect(peer)?;
-            socket.local_addr()
-        })
-        .map(|address| address.ip().to_string())
-        .unwrap_or_else(|_| "0.0.0.0".into())
+fn read_hello_request(stream: &mut std::net::TcpStream) -> std::io::Result<()> {
+    let mut buf = [0u8; 32];
+    let mut total = 0usize;
+    loop {
+        match stream.read(&mut buf[total..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                total += n;
+                if total >= buf.len() || buf[..total].contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::WouldBlock
+                    || err.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                break
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
 }
 
 fn spawn_control_loop(
@@ -262,8 +279,7 @@ fn spawn_control_loop(
             match listener.accept() {
                 Ok((mut stream, peer)) => {
                     let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
-                    let mut buf = [0u8; 256];
-                    let _ = stream.read(&mut buf);
+                    let _ = read_hello_request(&mut stream);
                     let snapshot = status.lock().unwrap().clone();
                     let payload = serde_json::to_vec(&snapshot).unwrap_or_default();
                     let _ = stream.write_all(&payload);

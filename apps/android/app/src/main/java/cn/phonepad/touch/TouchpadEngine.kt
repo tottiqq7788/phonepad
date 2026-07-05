@@ -32,6 +32,23 @@ class TouchpadEngine(
         this.target = target
     }
 
+    fun clickLeft() = sendClick(Protocol.MouseButton.Left) { haptics.leftClick() }
+
+    fun clickRight() = sendClick(Protocol.MouseButton.Right) { haptics.rightClick() }
+
+    fun clickMiddle() = sendClick(Protocol.MouseButton.Middle) { haptics.middleClick() }
+
+    private fun sendClick(button: Protocol.MouseButton, haptic: () -> Unit) {
+        val host = target ?: return
+        val now = System.currentTimeMillis() * 1000L
+        sender.send(
+            host.host,
+            host.udpPort,
+            Protocol.InputPacket.click(0, now, button),
+        )
+        haptic()
+    }
+
     fun onPointerDown(count: Int, x: Float, y: Float, eventTime: Long) {
         pointerCount = count
         maxPointerCount = maxOf(maxPointerCount, count)
@@ -139,19 +156,18 @@ class TouchpadEngine(
             maxPointerCount = 0
             moved = false
         } else {
-            // Keep a multi-finger gesture classified until all fingers are lifted.
-            mode = when (maxPointerCount) {
+            mode = when (count) {
                 1 -> Mode.OneFinger
                 2 -> Mode.TwoFinger
                 else -> Mode.MultiFinger
             }
-            if (maxPointerCount == 1) {
-                downX = x
-                downY = y
-                downTime = eventTime
-                lastSentX = 0f
-                lastSentY = 0f
-            }
+            maxPointerCount = count
+            downX = x
+            downY = y
+            downTime = eventTime
+            lastSentX = 0f
+            lastSentY = 0f
+            moved = false
         }
     }
 

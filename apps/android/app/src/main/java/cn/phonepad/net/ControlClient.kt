@@ -23,11 +23,10 @@ class ControlClient {
             runCatching {
                 Socket().use { socket ->
                     socket.connect(InetSocketAddress(host, port), 1200)
+                    socket.soTimeout = 1200
                     socket.getOutputStream().write("HELLO\n".toByteArray())
-                    val buffer = ByteArray(1024)
-                    val read = socket.getInputStream().read(buffer)
-                    if (read <= 0) return@runCatching null
-                    val json = JSONObject(String(buffer, 0, read, Charsets.UTF_8))
+                    val jsonText = TcpStatusReader.readJson(socket.getInputStream()) ?: return@runCatching null
+                    val json = JSONObject(jsonText)
                     ReceiverStatus(
                         running = json.optBoolean("running"),
                         packetsReceived = json.optLong("packetsReceived"),
