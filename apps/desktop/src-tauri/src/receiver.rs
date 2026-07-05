@@ -1,0 +1,290 @@
+use std::{
+    io::{Read, Write},
+    net::{SocketAddr, TcpListener, UdpSocket},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+use phonepad_protocol::{
+    ButtonAction, InputPacket, PacketKind, DISCOVERY_REQUEST, TCP_CONTROL_PORT, UDP_DISCOVERY_PORT,
+    UDP_INPUT_PORT,
+};
+
+use crate::{input::InputController, settings::ReceiverSettings};
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiverStatus {
+    pub running: bool,
+    pub udp_port: u16,
+    pub tcp_port: u16,
+    pub discovery_port: u16,
+    pub packets_received: u64,
+    pub packets_dropped: u64,
+    pub move_packets: u64,
+    pub scroll_packets: u64,
+    pub click_packets: u64,
+    pub last_client: Option<String>,
+    pub last_rtt_ms: Option<f64>,
+}
+
+impl Default for ReceiverStatus {
+    fn default() -> Self {
+        Self {
+            running: false,
+            udp_port: UDP_INPUT_PORT,
+            tcp_port: TCP_CONTROL_PORT,
+            discovery_port: UDP_DISCOVERY_PORT,
+            packets_received: 0,
+            packets_dropped: 0,
+            move_packets: 0,
+            scroll_packets: 0,
+            click_packets: 0,
+            last_client: None,
+            last_rtt_ms: None,
+        }
+    }
+}
+
+pub struct ReceiverHandle {
+    shutdown: Arc<AtomicBool>,
+    status: Arc<Mutex<ReceiverStatus>>,
+}
+
+impl ReceiverHandle {
+    pub fn snapshot(&self) -> ReceiverStatus {
+        self.status.lock().unwrap().clone()
+    }
+
+    pub fn stop(&self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.status.lock().unwrap().running = false;
+    }
+}
+
+pub fn start(
+    app: AppHandle,
+    settings: Arc<Mutex<ReceiverSettings>>,
+) -> Result<ReceiverHandle, String> {
+    let udp_socket = UdpSocket::bind(("0.0.0.0", UDP_INPUT_PORT)).map_err(|err| err.to_string())?;
+    udp_socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .map_err(|err| err.to_string())?;
+
+    let discovery_socket =
+        UdpSocket::bind(("0.0.0.0", UDP_DISCOVERY_PORT)).map_err(|err| err.to_string())?;
+    discovery_socket
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .map_err(|err| err.to_string())?;
+
+    let tcp_listener =
+        TcpListener::bind(("0.0.0.0", TCP_CONTROL_PORT)).map_err(|err| err.to_string())?;
+    tcp_listener
+        .set_nonblocking(true)
+        .map_err(|err| err.to_string())?;
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let status = Arc::new(Mutex::new(ReceiverStatus {
+        running: true,
+        ..ReceiverStatus::default()
+    }));
+
+    spawn_input_loop(
+        app.clone(),
+        udp_socket,
+        settings.clone(),
+        shutdown.clone(),
+        status.clone(),
+    );
+    spawn_discovery_loop(discovery_socket, shutdown.clone(), status.clone());
+    spawn_control_loop(app, tcp_listener, shutdown.clone(), status.clone());
+
+    Ok(ReceiverHandle { shutdown, status })
+}
+
+fn spawn_input_loop(
+    app: AppHandle,
+    socket: UdpSocket,
+    settings: Arc<Mutex<ReceiverSettings>>,
+    shutdown: Arc<AtomicBool>,
+    status: Arc<Mutex<ReceiverStatus>>,
+) {
+    thread::spawn(move || {
+        let mut input = match InputController::new() {
+            Ok(input) => input,
+            Err(err) => {
+                status.lock().unwrap().running = false;
+                let _ = app.emit("receiver://error", err);
+                return;
+            }
+        };
+        let mut buf = [0u8; 64];
+        let mut last_sequence = 0u32;
+        let mut last_peer: Option<SocketAddr> = None;
+
+        while !shutdown.load(Ordering::Relaxed) {
+            let (len, peer) = match socket.recv_from(&mut buf) {
+                Ok(packet) => packet,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue
+                }
+                Err(err) => {
+                    let _ = app.emit("receiver://error", err.to_string());
+                    continue;
+                }
+            };
+
+            let packet = match InputPacket::decode(&buf[..len]) {
+                Ok(packet) => packet,
+                Err(_) => {
+                    status.lock().unwrap().packets_dropped += 1;
+                    continue;
+                }
+            };
+
+            if last_peer != Some(peer) {
+                last_peer = Some(peer);
+                last_sequence = 0;
+            }
+
+            if packet.sequence <= last_sequence && last_sequence.wrapping_sub(packet.sequence) < 10_000 {
+                if packet.sequence <= 32 && last_sequence > 1_000 {
+                    last_sequence = 0;
+                } else {
+                    status.lock().unwrap().packets_dropped += 1;
+                    continue;
+                }
+            }
+            if packet.sequence <= last_sequence {
+                status.lock().unwrap().packets_dropped += 1;
+                continue;
+            }
+            last_sequence = packet.sequence;
+
+            {
+                let mut snapshot = status.lock().unwrap();
+                snapshot.packets_received += 1;
+                snapshot.last_client = Some(peer.to_string());
+                snapshot.last_rtt_ms = estimate_rtt(packet.timestamp_micros);
+                match packet.kind {
+                    PacketKind::Move => snapshot.move_packets += 1,
+                    PacketKind::Scroll => snapshot.scroll_packets += 1,
+                    PacketKind::Click | PacketKind::Button => snapshot.click_packets += 1,
+                    _ => {}
+                }
+            }
+
+            let current_settings = settings.lock().unwrap().clone();
+            let result = match packet.kind {
+                PacketKind::Move => input.move_mouse(packet.x, packet.y, &current_settings),
+                PacketKind::Scroll => input.scroll(packet.x, packet.y, &current_settings),
+                PacketKind::Click => packet.button.map_or(Ok(()), |button| input.click(button)),
+                PacketKind::Button => {
+                    let button = packet.button;
+                    let action = packet.action.unwrap_or(ButtonAction::Click);
+                    button.map_or(Ok(()), |button| input.button(button, action))
+                }
+                _ => Ok(()),
+            };
+
+            if let Err(err) = result {
+                let _ = app.emit("receiver://error", err);
+            }
+        }
+    });
+}
+
+fn spawn_discovery_loop(
+    socket: UdpSocket,
+    shutdown: Arc<AtomicBool>,
+    status: Arc<Mutex<ReceiverStatus>>,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 128];
+
+        while !shutdown.load(Ordering::Relaxed) {
+            let (len, peer) = match socket.recv_from(&mut buf) {
+                Ok(packet) => packet,
+                Err(err)
+                    if err.kind() == std::io::ErrorKind::WouldBlock
+                        || err.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    continue
+                }
+                Err(_) => continue,
+            };
+
+            if &buf[..len] != DISCOVERY_REQUEST {
+                continue;
+            }
+
+            let ip = local_ip_for_peer(peer);
+            let payload = serde_json::json!({
+                "name": "PhonePad Receiver",
+                "ip": ip,
+                "udpPort": UDP_INPUT_PORT,
+                "tcpPort": TCP_CONTROL_PORT,
+                "discoveryPort": UDP_DISCOVERY_PORT,
+                "running": status.lock().unwrap().running,
+            });
+            let _ = socket.send_to(payload.to_string().as_bytes(), peer);
+        }
+    });
+}
+
+fn local_ip_for_peer(peer: std::net::SocketAddr) -> String {
+    UdpSocket::bind(("0.0.0.0", 0))
+        .and_then(|socket| {
+            socket.connect(peer)?;
+            socket.local_addr()
+        })
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|_| "0.0.0.0".into())
+}
+
+fn spawn_control_loop(
+    app: AppHandle,
+    listener: TcpListener,
+    shutdown: Arc<AtomicBool>,
+    status: Arc<Mutex<ReceiverStatus>>,
+) {
+    thread::spawn(move || {
+        while !shutdown.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, peer)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
+                    let mut buf = [0u8; 256];
+                    let _ = stream.read(&mut buf);
+                    let snapshot = status.lock().unwrap().clone();
+                    let payload = serde_json::to_vec(&snapshot).unwrap_or_default();
+                    let _ = stream.write_all(&payload);
+                    status.lock().unwrap().last_client = Some(peer.to_string());
+                    let _ = app.emit("receiver://status", snapshot);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(80));
+                }
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(200));
+                }
+            }
+        }
+    });
+}
+
+fn estimate_rtt(timestamp_micros: u64) -> Option<f64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_micros() as u64;
+    if timestamp_micros == 0 || timestamp_micros > now {
+        return None;
+    }
+    Some((now - timestamp_micros) as f64 / 1000.0)
+}

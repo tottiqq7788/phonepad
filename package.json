@@ -1,0 +1,19 @@
+{
+  "name": "phonepad",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Low-latency Android touchpad for Windows and macOS.",
+  "workspaces": [
+    "apps/desktop"
+  ],
+  "scripts": {
+    "desktop:dev": "npm --workspace apps/desktop run tauri:dev",
+    "desktop:build": "npm --workspace apps/desktop run tauri:build",
+    "android:assemble": "cd apps/android && .\\gradlew.bat assembleDebug",
+    "android:assemble:release": "cd apps/android && .\\gradlew.bat assembleRelease",
+    "lint": "npm --workspace apps/desktop run typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

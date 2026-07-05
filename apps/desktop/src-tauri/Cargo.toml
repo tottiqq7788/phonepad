@@ -1,0 +1,24 @@
+[package]
+name = "phonepad-desktop"
+version = "0.1.0"
+description = "Low-latency desktop receiver for PhonePad."
+authors = ["PhonePad"]
+license = "MIT"
+repository = ""
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+enigo = "0.2"
+local-ip-address = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
+phonepad-protocol = { path = "../../../crates/protocol" }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

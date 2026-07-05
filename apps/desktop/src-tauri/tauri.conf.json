@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PhonePad Receiver",
+  "version": "0.1.0",
+  "identifier": "cn.phonepad.receiver",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PhonePad Receiver",
+        "width": 1040,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 560,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "dmg"],
+    "category": "Utility",
+    "shortDescription": "Low-latency Android touchpad receiver",
+    "longDescription": "PhonePad turns an Android phone into a low-latency touchpad for Windows and macOS.",
+    "windows": {
+      "nsis": {
+        "displayLanguageSelector": true
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "entitlements": null,
+      "exceptionDomain": "",
+      "frameworks": [],
+      "signingIdentity": null,
+      "providerShortName": null
+    }
+  }
+}
