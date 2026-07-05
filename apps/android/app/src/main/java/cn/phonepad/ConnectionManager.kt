@@ -27,6 +27,7 @@ data class ConnectionUiState(
     val activeDeviceName: String = "",
     val host: String = "",
     val checkingOnline: Boolean = false,
+    val connecting: Boolean = false,
     val lastRttMs: Double? = null,
     val packetsReceived: Long = 0,
     val error: String? = null,
@@ -63,7 +64,7 @@ class ConnectionManager(
         onlineJob?.cancel()
         onlineJob = scope.launch {
             while (isActive) {
-                refreshOnlineStates()
+                refreshOnlineStatesInternal()
                 delay(3000)
             }
         }
@@ -71,30 +72,34 @@ class ConnectionManager(
 
     fun refreshOnlineStates() {
         onlineRefreshJob?.cancel()
-        onlineRefreshJob = scope.launch {
-            val devices = store.load()
-            if (devices.isEmpty()) {
-                uiState = uiState.copy(pairedDevices = emptyList(), checkingOnline = false)
-                return@launch
-            }
-            uiState = uiState.copy(checkingOnline = true)
-            val states = linkedMapOf<String, DeviceOnlineState>()
-            devices.forEach { device ->
-                val status = controlClient.fetchStatus(
-                    host = device.host,
-                    deviceId = device.id,
-                    secret = device.secret,
-                    port = device.tcpPort,
-                )
-                states[device.id] = if (status?.running == true) {
-                    DeviceOnlineState.Online
-                } else {
-                    DeviceOnlineState.Offline
-                }
-            }
-            val updated = store.updateOnlineStates(states)
-            uiState = uiState.copy(pairedDevices = updated, checkingOnline = false)
+        onlineRefreshJob = scope.launch { refreshOnlineStatesInternal() }
+    }
+
+    private suspend fun refreshOnlineStatesInternal() {
+        val devices = store.load()
+        if (devices.isEmpty()) {
+            uiState = uiState.copy(pairedDevices = emptyList(), checkingOnline = false)
+            return
         }
+        if (!uiState.connecting) {
+            uiState = uiState.copy(checkingOnline = true)
+        }
+        val states = linkedMapOf<String, DeviceOnlineState>()
+        devices.forEach { device ->
+            val status = controlClient.fetchStatus(
+                host = device.host,
+                deviceId = device.id,
+                secret = device.secret,
+                port = device.tcpPort,
+            )
+            states[device.id] = if (status?.running == true) {
+                DeviceOnlineState.Online
+            } else {
+                DeviceOnlineState.Offline
+            }
+        }
+        val updated = store.updateOnlineStates(states)
+        uiState = uiState.copy(pairedDevices = updated, checkingOnline = false)
     }
 
     fun pairFromScan(raw: String) {
@@ -115,14 +120,6 @@ class ConnectionManager(
                 uiState = uiState.copy(error = "设备不存在，请重新扫码。")
                 return@launch
             }
-            if (device.onlineState != DeviceOnlineState.Online) {
-                refreshOnlineStates()
-                val refreshed = store.load().firstOrNull { it.id == deviceId }
-                if (refreshed?.onlineState != DeviceOnlineState.Online) {
-                    uiState = uiState.copy(error = "${device.name} 当前不可用，请确认桌面端已启动。")
-                    return@launch
-                }
-            }
             connectWithPayload(
                 PairingPayload(
                     deviceId = device.id,
@@ -139,7 +136,7 @@ class ConnectionManager(
 
     private suspend fun connectWithPayload(payload: PairingPayload, fromScan: Boolean) {
         monitorJob?.cancel()
-        uiState = uiState.copy(error = null, showDevicePicker = false)
+        uiState = uiState.copy(error = null, showDevicePicker = false, connecting = true)
         val status = controlClient.fetchStatus(
             host = payload.host,
             deviceId = payload.deviceId,
@@ -149,6 +146,7 @@ class ConnectionManager(
         if (status == null || !status.running) {
             uiState = uiState.copy(
                 connected = false,
+                connecting = false,
                 error = "无法连接到 ${payload.deviceName}，请确认桌面端已启动接收服务。",
             )
             haptics.disconnected()
@@ -157,6 +155,7 @@ class ConnectionManager(
         if (status.deviceId.isNotBlank() && status.deviceId != payload.deviceId) {
             uiState = uiState.copy(
                 connected = false,
+                connecting = false,
                 error = "二维码设备身份不匹配，请重新扫码。",
             )
             haptics.disconnected()
@@ -186,6 +185,7 @@ class ConnectionManager(
         uiState = uiState.copy(
             pairedDevices = devices,
             connected = true,
+            connecting = false,
             activeDeviceId = device.id,
             activeDeviceName = device.name,
             host = payload.host,
@@ -206,10 +206,12 @@ class ConnectionManager(
         inputSender.setSecret("")
         uiState = uiState.copy(
             connected = false,
+            connecting = false,
             activeDeviceId = "",
             activeDeviceName = "",
             host = "",
             lastRttMs = null,
+            error = null,
             showDevicePicker = false,
         )
         haptics.disconnected()

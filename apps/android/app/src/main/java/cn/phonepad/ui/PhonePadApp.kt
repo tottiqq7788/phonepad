@@ -73,6 +73,13 @@ private val ErrorColor = Color(0xFFF87171)
 private val TouchpadSurface = Color(0xFF0D0F14)
 private val RailWidth = 72.dp
 
+private fun buildScanOptions(): ScanOptions =
+    ScanOptions()
+        .setCaptureActivity(QrScanActivity::class.java)
+        .setPrompt("扫描桌面端配对二维码")
+        .setBeepEnabled(false)
+        .setOrientationLocked(true)
+
 @Composable
 fun PhonePadApp(connectionManager: ConnectionManager) {
     val state = connectionManager.uiState
@@ -91,7 +98,6 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             state = state,
             onScan = connectionManager::pairFromScan,
             onConnectDevice = connectionManager::connectToDevice,
-            onRefreshOnline = connectionManager::refreshOnlineStates,
         )
     }
 }
@@ -101,7 +107,6 @@ private fun DeviceHomeScreen(
     state: ConnectionUiState,
     onScan: (String) -> Unit,
     onConnectDevice: (String) -> Unit,
-    onRefreshOnline: () -> Unit,
 ) {
     val context = LocalContext.current
     var scanError by remember { mutableStateOf<String?>(null) }
@@ -117,12 +122,7 @@ private fun DeviceHomeScreen(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            scanLauncher.launch(
-                ScanOptions()
-                    .setPrompt("扫描桌面端配对二维码")
-                    .setBeepEnabled(false)
-                    .setOrientationLocked(true),
-            )
+            scanLauncher.launch(buildScanOptions())
         } else {
             scanError = "需要相机权限才能扫码连接，请在系统设置中开启。"
         }
@@ -132,12 +132,7 @@ private fun DeviceHomeScreen(
         when {
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
                 PackageManager.PERMISSION_GRANTED -> {
-                scanLauncher.launch(
-                    ScanOptions()
-                        .setPrompt("扫描桌面端配对二维码")
-                        .setBeepEnabled(false)
-                        .setOrientationLocked(true),
-                )
+                scanLauncher.launch(buildScanOptions())
             }
             else -> cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
         }
@@ -163,9 +158,15 @@ private fun DeviceHomeScreen(
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = "已配对设备",
-                    color = TextSecondary,
+                    text = when {
+                        state.connecting -> "正在连接..."
+                        state.checkingOnline -> "正在检测设备状态..."
+                        else -> "已配对设备"
+                    },
+                    color = if (state.connecting || state.checkingOnline) TextMuted else TextSecondary,
                     fontSize = 14.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             IconButton(onClick = ::startScan) {
@@ -176,10 +177,6 @@ private fun DeviceHomeScreen(
                     modifier = Modifier.size(28.dp),
                 )
             }
-        }
-
-        if (state.checkingOnline) {
-            Text(text = "正在检测设备状态...", color = TextMuted, fontSize = 12.sp)
         }
 
         state.error?.let { ErrorBanner(it) }
@@ -208,10 +205,8 @@ private fun DeviceHomeScreen(
                 items(state.pairedDevices, key = { it.id }) { device ->
                     PairedDeviceCard(
                         device = device,
-                        onClick = {
-                            onRefreshOnline()
-                            onConnectDevice(device.id)
-                        },
+                        connecting = state.connecting,
+                        onClick = { onConnectDevice(device.id) },
                     )
                 }
             }
@@ -220,7 +215,7 @@ private fun DeviceHomeScreen(
 }
 
 @Composable
-private fun PairedDeviceCard(device: PairedDevice, onClick: () -> Unit) {
+private fun PairedDeviceCard(device: PairedDevice, connecting: Boolean, onClick: () -> Unit) {
     val online = device.onlineState == DeviceOnlineState.Online
     val timeLabel = if (device.lastConnectedAt > 0) {
         SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(device.lastConnectedAt))
@@ -234,7 +229,7 @@ private fun PairedDeviceCard(device: PairedDevice, onClick: () -> Unit) {
             .clip(RoundedCornerShape(12.dp))
             .background(BgPanel)
             .border(1.dp, BorderColor, RoundedCornerShape(12.dp))
-            .clickable(enabled = online, onClick = onClick)
+            .clickable(enabled = !connecting, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
@@ -253,7 +248,7 @@ private fun PairedDeviceCard(device: PairedDevice, onClick: () -> Unit) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = device.name,
-                    color = if (online) TextPrimary else TextSecondary,
+                    color = TextPrimary,
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 15.sp,
                     maxLines = 1,
@@ -269,8 +264,12 @@ private fun PairedDeviceCard(device: PairedDevice, onClick: () -> Unit) {
             }
         }
         Text(
-            text = if (online) "进入" else "离线",
-            color = if (online) Accent else TextMuted,
+            text = when {
+                connecting -> "连接中"
+                online -> "进入"
+                else -> "连接"
+            },
+            color = if (online || connecting) Accent else TextSecondary,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
         )
@@ -406,7 +405,7 @@ private fun DevicePickerOverlay(
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (device.id == activeDeviceId) BgElevated else BgBase)
                         .border(1.dp, BorderColor, RoundedCornerShape(10.dp))
-                        .clickable(enabled = online && device.id != activeDeviceId) {
+                        .clickable(enabled = device.id != activeDeviceId) {
                             onSelectDevice(device.id)
                         }
                         .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -422,9 +421,9 @@ private fun DevicePickerOverlay(
                         text = when {
                             device.id == activeDeviceId -> "当前"
                             online -> "切换"
-                            else -> "离线"
+                            else -> "连接"
                         },
-                        color = if (online) Accent else TextMuted,
+                        color = if (device.id == activeDeviceId) TextMuted else Accent,
                         fontSize = 12.sp,
                     )
                 }

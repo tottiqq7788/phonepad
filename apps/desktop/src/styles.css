@@ -30,6 +30,7 @@
 
 body {
   margin: 0;
+  overflow-y: auto;
 }
 
 button,
@@ -217,6 +218,23 @@ input {
   color: var(--accent);
 }
 
+.device-name-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.device-name-inline .device-name-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.btn--compact {
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
 /* Pairing panel */
 .pairing-panel {
   display: grid;
@@ -316,6 +334,23 @@ input {
 input[type="range"] {
   width: 100%;
   accent-color: var(--accent);
+}
+
+.device-name-input {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 600;
+}
+
+.device-name-input:focus {
+  outline: none;
+  border-color: rgba(91, 159, 212, 0.45);
+  box-shadow: 0 0 0 2px var(--accent-dim);
 }
 
 /* Alerts */

@@ -194,7 +194,19 @@ export default function App() {
           <h2>连接状态</h2>
           <dl className="meta-grid">
             <dt>设备名称</dt>
-            <dd className="highlight">{device?.deviceName ?? pairing?.deviceName ?? "—"}</dd>
+            <dd className="device-name-inline">
+              <input
+                type="text"
+                className="device-name-input"
+                value={deviceNameDraft}
+                maxLength={32}
+                placeholder="输入设备名称"
+                onChange={(event) => setDeviceNameDraft(event.target.value)}
+              />
+              <button type="button" className="btn btn--primary btn--compact" onClick={saveDeviceName}>
+                保存
+              </button>
+            </dd>
             <dt>推荐 IP</dt>
             <dd className="highlight">{displayIp}</dd>
             <dt>最近客户端</dt>
@@ -220,18 +232,6 @@ export default function App() {
               <p className="hint">设备 ID：{pairing?.deviceId ?? device?.deviceId ?? "—"}</p>
             </div>
           </div>
-          <label className="slider-field">
-            编辑设备名称
-            <input
-              type="text"
-              value={deviceNameDraft}
-              maxLength={32}
-              onChange={(event) => setDeviceNameDraft(event.target.value)}
-            />
-            <button type="button" className="btn btn--primary" onClick={saveDeviceName}>
-              保存名称
-            </button>
-          </label>
         </article>
 
         <article className="panel">
