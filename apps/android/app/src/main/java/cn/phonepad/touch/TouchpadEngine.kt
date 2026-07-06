@@ -66,8 +66,8 @@ class TouchpadEngine(
             twoFingerTapEligible = count == 2
         } else {
             sessionMaxPointerCount = maxOf(sessionMaxPointerCount, count)
-            if (count == 2 && mode == Mode.OneFinger) {
-                twoFingerTapEligible = false
+            if (count == 2) {
+                twoFingerTapEligible = !sessionMoved
             }
         }
 
@@ -154,8 +154,7 @@ class TouchpadEngine(
                 !sessionMoved &&
                     sessionMaxPointerCount == 2 &&
                     twoFingerTapEligible &&
-                    duration <= TAP_MAX_DURATION &&
-                    distance <= TAP_MAX_DISTANCE -> {
+                    duration <= TAP_MAX_DURATION -> {
                     val now = System.currentTimeMillis() * 1000L
                     sender.send(
                         host.host,

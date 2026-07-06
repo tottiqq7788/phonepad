@@ -86,8 +86,26 @@ class TouchpadEngineTest {
     }
 
     @Test
-    fun accidentalSecondFingerDoesNotTriggerRightClick() {
+    fun staggeredTwoFingerDownTapSendsRightClick() {
         engine.onPointerDown(1, 100f, 100f, 0L)
+        engine.onPointerDown(2, 180f, 100f, 50L)
+        engine.onPointerUp(0, 140f, 100f, 150L)
+        assertEquals(1, sender.packets.size)
+        assertEquals(Protocol.MouseButton.Right, sender.packets.first().button)
+    }
+
+    @Test
+    fun twoFingerTapWithSpreadFingersSendsRightClick() {
+        engine.onPointerDown(2, 100f, 100f, 0L)
+        engine.onPointerUp(0, 200f, 100f, 100L)
+        assertEquals(1, sender.packets.size)
+        assertEquals(Protocol.MouseButton.Right, sender.packets.first().button)
+    }
+
+    @Test
+    fun accidentalSecondFingerAfterMoveDoesNotTriggerRightClick() {
+        engine.onPointerDown(1, 100f, 100f, 0L)
+        engine.onPointerMove(1, 110f, 100f)
         engine.onPointerDown(2, 105f, 100f, 40L)
         engine.onPointerUp(0, 105f, 100f, 120L)
         assertTrue(sender.packets.none { it.kind == Protocol.PacketKind.Click && it.button == Protocol.MouseButton.Right })
