@@ -9,6 +9,8 @@ import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
 import cn.phonepad.net.ControlClient
 import cn.phonepad.net.DiscoveryClient
+import cn.phonepad.net.KeyboardKey
+import cn.phonepad.net.KeyboardKeyEvent
 import cn.phonepad.net.InputSender
 import cn.phonepad.net.PairingPayload
 import cn.phonepad.net.PairingUrlParser
@@ -20,6 +22,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.coroutineContext
 
 data class ConnectionUiState(
     val pairedDevices: List<PairedDevice> = emptyList(),
@@ -54,10 +59,18 @@ class ConnectionManager(
     private var onlineJob: Job? = null
     private var onlineRefreshJob: Job? = null
     private var textSendJob: Job? = null
+    private val keyboardSendMutex = Mutex()
+    private val heldModifiers = mutableSetOf<String>()
 
     companion object {
         private const val MAX_TEXT_CHARS = 4096
         private const val MAX_TEXT_BYTES = 6000
+        private val MODIFIER_KEYS = setOf(
+            KeyboardKey.CTRL,
+            KeyboardKey.SHIFT,
+            KeyboardKey.ALT,
+            KeyboardKey.META,
+        )
     }
 
     init {
@@ -261,6 +274,7 @@ class ConnectionManager(
     }
 
     fun disconnect() {
+        releaseHeldKeyboardModifiers()
         monitorJob?.cancel()
         textSendJob?.cancel()
         touchpadEngine.setTarget(null)
@@ -349,35 +363,71 @@ class ConnectionManager(
     }
 
     fun sendKeyActionToActiveDevice(action: String, repeat: Int = 1) {
-        scope.launch {
-            if (!uiState.connected || uiState.activeDeviceId.isBlank()) {
-                uiState = uiState.copy(textInputError = "设备未连接")
-                return@launch
-            }
-            val device = store.load().firstOrNull { it.id == uiState.activeDeviceId } ?: run {
-                uiState = uiState.copy(textInputError = "设备不存在，请重新连接")
-                return@launch
-            }
+        sendKeyboardKeyToActiveDevice(action, event = null, repeat = repeat)
+    }
 
-            val response = controlClient.sendKeyAction(
-                host = device.host,
-                deviceId = device.id,
-                secret = device.secret,
-                port = device.tcpPort,
-                action = action,
-                repeat = repeat.coerceIn(1, 20),
+    fun sendKeyboardKeyToActiveDevice(action: String, event: String?, repeat: Int = 1) {
+        scope.launch {
+            keyboardSendMutex.withLock {
+                sendKeyboardKeyLocked(action, event, repeat)
+            }
+        }
+    }
+
+    fun releaseHeldKeyboardModifiers() {
+        val pending = synchronized(heldModifiers) { heldModifiers.toList().also { heldModifiers.clear() } }
+        if (pending.isEmpty()) return
+        scope.launch {
+            keyboardSendMutex.withLock {
+                pending.forEach { action ->
+                    sendKeyboardKeyLocked(action, KeyboardKeyEvent.UP, repeat = 1, trackModifier = false)
+                }
+            }
+        }
+    }
+
+    private suspend fun sendKeyboardKeyLocked(
+        action: String,
+        event: String?,
+        repeat: Int,
+        trackModifier: Boolean = true,
+    ) {
+        if (!uiState.connected || uiState.activeDeviceId.isBlank()) {
+            uiState = uiState.copy(textInputError = "设备未连接")
+            return
+        }
+        val device = store.load().firstOrNull { it.id == uiState.activeDeviceId } ?: run {
+            uiState = uiState.copy(textInputError = "设备不存在，请重新连接")
+            return
+        }
+
+        val response = controlClient.sendKeyboardKey(
+            host = device.host,
+            deviceId = device.id,
+            secret = device.secret,
+            port = device.tcpPort,
+            action = action,
+            event = event,
+            repeat = repeat.coerceIn(1, 20),
+        )
+        if (!coroutineContext.isActive) {
+            return
+        }
+        if (response.ok) {
+            if (trackModifier && action in MODIFIER_KEYS) {
+                synchronized(heldModifiers) {
+                    when (event) {
+                        KeyboardKeyEvent.DOWN -> heldModifiers.add(action)
+                        KeyboardKeyEvent.UP -> heldModifiers.remove(action)
+                    }
+                }
+            }
+            haptics.keyTap()
+            uiState = uiState.copy(textInputError = null)
+        } else {
+            uiState = uiState.copy(
+                textInputError = response.error ?: "按键发送失败，请确认桌面端仍在接收",
             )
-            if (!isActive) {
-                return@launch
-            }
-            if (response.ok) {
-                haptics.keyTap()
-                uiState = uiState.copy(textInputError = null)
-            } else {
-                uiState = uiState.copy(
-                    textInputError = response.error ?: "按键发送失败，请确认桌面端仍在接收",
-                )
-            }
         }
     }
 

@@ -34,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.Button
@@ -114,6 +115,8 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             onSelectDevice = connectionManager::connectToDevice,
             onSendText = connectionManager::sendTextToActiveDevice,
             onKeyAction = connectionManager::sendKeyActionToActiveDevice,
+            onKeyboardKey = connectionManager::sendKeyboardKeyToActiveDevice,
+            onReleaseKeyboardModifiers = connectionManager::releaseHeldKeyboardModifiers,
             onClearTextInputError = connectionManager::clearTextInputError,
         )
     } else {
@@ -309,10 +312,13 @@ private fun TouchpadScreen(
     onSelectDevice: (String) -> Unit,
     onSendText: (String, () -> Unit) -> Unit,
     onKeyAction: (String, Int) -> Unit,
+    onKeyboardKey: (String, String?) -> Unit,
+    onReleaseKeyboardModifiers: () -> Unit,
     onClearTextInputError: () -> Unit,
 ) {
     var showHelp by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
+    var showKeyboardInput by remember { mutableStateOf(false) }
 
     fun closeTextInput() {
         if (state.textSending) return
@@ -320,8 +326,18 @@ private fun TouchpadScreen(
         showTextInput = false
     }
 
+    fun closeKeyboardInput() {
+        onReleaseKeyboardModifiers()
+        onClearTextInputError()
+        showKeyboardInput = false
+    }
+
     BackHandler(enabled = showTextInput && !state.textSending) {
         closeTextInput()
+    }
+
+    BackHandler(enabled = showKeyboardInput) {
+        closeKeyboardInput()
     }
 
     Row(
@@ -332,14 +348,14 @@ private fun TouchpadScreen(
         LeftRail(
             state = state,
             onToggleHelp = {
-                if (showTextInput) return@LeftRail
+                if (showTextInput || showKeyboardInput) return@LeftRail
                 showHelp = !showHelp
                 if (showHelp) {
                     onCloseDevicePicker()
                 }
             },
             onOpenDevicePicker = {
-                if (showTextInput) return@LeftRail
+                if (showTextInput || showKeyboardInput) return@LeftRail
                 showHelp = false
                 onOpenDevicePicker()
             },
@@ -349,7 +365,7 @@ private fun TouchpadScreen(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxHeight()
-                .background(if (showTextInput) BgBase else TouchpadSurface),
+                .background(if (showTextInput || showKeyboardInput) BgBase else TouchpadSurface),
         ) {
             if (showTextInput) {
                 TextInputScreen(
@@ -358,6 +374,13 @@ private fun TouchpadScreen(
                     onBack = ::closeTextInput,
                     onSend = onSendText,
                     onKeyAction = onKeyAction,
+                )
+            } else if (showKeyboardInput) {
+                KeyboardInputScreen(
+                    error = state.textInputError,
+                    onBack = ::closeKeyboardInput,
+                    onKeyboardKey = onKeyboardKey,
+                    onReleaseModifiers = onReleaseKeyboardModifiers,
                 )
             } else {
                 Box(
@@ -426,16 +449,20 @@ private fun TouchpadScreen(
         }
 
         RightRail(
-            touchpadEnabled = !showTextInput,
             onDisconnect = onDisconnect,
-            onLeftClick = engine::clickLeft,
-            onRightClick = engine::clickRight,
-            onMiddleClick = engine::clickMiddle,
             onOpenTextInput = {
                 showHelp = false
                 onCloseDevicePicker()
                 onClearTextInputError()
+                showKeyboardInput = false
                 showTextInput = true
+            },
+            onOpenKeyboardInput = {
+                showHelp = false
+                onCloseDevicePicker()
+                onClearTextInputError()
+                showTextInput = false
+                showKeyboardInput = true
             },
         )
     }
@@ -767,12 +794,9 @@ private fun LeftRail(
 
 @Composable
 private fun RightRail(
-    touchpadEnabled: Boolean,
     onDisconnect: () -> Unit,
-    onLeftClick: () -> Unit,
-    onRightClick: () -> Unit,
-    onMiddleClick: () -> Unit,
     onOpenTextInput: () -> Unit,
+    onOpenKeyboardInput: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -792,11 +816,16 @@ private fun RightRail(
             accent = ErrorColor,
         )
 
-        RailButton(label = "左", onClick = onLeftClick, enabled = touchpadEnabled)
-        RailButton(label = "中", onClick = onMiddleClick, enabled = touchpadEnabled)
-        RailButton(label = "右", onClick = onRightClick, enabled = touchpadEnabled)
-
         Spacer(modifier = Modifier.weight(1f))
+
+        RailIconButton(
+            icon = Icons.Filled.Keyboard,
+            contentDescription = "键盘模式",
+            onClick = onOpenKeyboardInput,
+            accent = Accent,
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         RailIconButton(
             icon = Icons.Filled.Edit,
@@ -898,7 +927,6 @@ private fun HelpOverlay(onDismiss: () -> Unit) {
             HelpLine("单指点击", "左键单击")
             HelpLine("双指滑动", "滚动页面")
             HelpLine("双指点击", "右键单击")
-            HelpLine("侧栏「左/右/中」", "直接发送对应按键")
             Text(text = "点击任意处关闭", color = TextMuted, fontSize = 12.sp)
         }
     }

@@ -9,6 +9,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use enigo::Direction;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use phonepad_protocol::{
@@ -18,7 +19,7 @@ use phonepad_protocol::{
 
 use crate::{
     device_config::DeviceConfig,
-    input::{normalize_key_repeat, parse_key_action, InputController},
+    input::{normalize_key_repeat, parse_key_action, parse_key_event, InputController},
     settings::ReceiverSettings,
 };
 
@@ -73,6 +74,7 @@ struct ControlRequest {
     secret: String,
     content: Option<String>,
     action: Option<String>,
+    event: Option<String>,
     repeat: Option<u32>,
 }
 
@@ -402,6 +404,7 @@ fn handle_text_request(
 fn handle_key_request(
     input: &mut InputController,
     action: Option<String>,
+    event: Option<String>,
     repeat: Option<u32>,
 ) -> ControlResponse {
     let action_name = action.unwrap_or_default();
@@ -422,8 +425,25 @@ fn handle_key_request(
         }
     };
 
-    let repeat_count = normalize_key_repeat(repeat);
-    match input.press_key(key, repeat_count) {
+    let direction = match parse_key_event(event.as_deref()) {
+        Ok(direction) => direction,
+        Err(error) => {
+            return ControlResponse {
+                ok: false,
+                error: Some(error),
+            };
+        }
+    };
+
+    let result = match direction {
+        Direction::Click => {
+            let repeat_count = normalize_key_repeat(repeat);
+            input.press_key(key, repeat_count)
+        }
+        other => input.key_event(key, other),
+    };
+
+    match result {
         Ok(()) => ControlResponse {
             ok: true,
             error: None,
@@ -512,7 +532,7 @@ fn handle_control_connection(
             let mut input = InputController::new().ok();
             let response = match input.as_mut() {
                 Some(controller) => {
-                    handle_key_request(controller, request.action, request.repeat)
+                    handle_key_request(controller, request.action, request.event, request.repeat)
                 }
                 None => ControlResponse {
                     ok: false,
@@ -643,13 +663,26 @@ mod tests {
 
     #[test]
     fn parses_supported_key_actions() {
-        use crate::input::parse_key_action;
-        use enigo::Key;
+        use crate::input::{parse_key_action, parse_key_event};
+        use enigo::{Key, Direction};
 
         assert!(matches!(parse_key_action("backspace"), Ok(Key::Backspace)));
         assert!(matches!(parse_key_action("delete"), Ok(Key::Delete)));
         assert!(matches!(parse_key_action("cursor_left"), Ok(Key::LeftArrow)));
         assert!(matches!(parse_key_action("cursor_right"), Ok(Key::RightArrow)));
+        assert!(matches!(parse_key_action("a"), Ok(Key::Unicode('a'))));
+        assert!(matches!(parse_key_action("ctrl"), Ok(Key::Control)));
+        assert!(matches!(parse_key_action("enter"), Ok(Key::Return)));
+        assert!(matches!(parse_key_event(None), Ok(Direction::Click)));
+        assert!(matches!(parse_key_event(Some("down")), Ok(Direction::Press)));
+        assert!(parse_key_event(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn parses_key_control_request_with_event() {
+        let json = r#"{"type":"key","deviceId":"dev-1","secret":"secret","action":"ctrl","event":"down"}"#;
+        let request: ControlRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.event.as_deref(), Some("down"));
     }
 
     #[test]

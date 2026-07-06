@@ -38,23 +38,6 @@ class TouchpadEngine(
         this.target = target
     }
 
-    fun clickLeft() = sendClick(Protocol.MouseButton.Left) { haptics.leftClick() }
-
-    fun clickRight() = sendClick(Protocol.MouseButton.Right) { haptics.rightClick() }
-
-    fun clickMiddle() = sendClick(Protocol.MouseButton.Middle) { haptics.middleClick() }
-
-    private fun sendClick(button: Protocol.MouseButton, haptic: () -> Unit) {
-        val host = target ?: return
-        val now = System.currentTimeMillis() * 1000L
-        sender.send(
-            host.host,
-            host.udpPort,
-            Protocol.InputPacket.click(0, now, button, authToken = 0L),
-        )
-        haptic()
-    }
-
     fun onPointerDown(count: Int, x: Float, y: Float, eventTime: Long) {
         pointerCount = count
         if (mode == Mode.Idle) {

@@ -82,6 +82,10 @@ impl InputController {
         }
         Ok(())
     }
+
+    pub fn key_event(&mut self, key: Key, direction: Direction) -> Result<(), String> {
+        self.enigo.key(key, direction).map_err(|err| err.to_string())
+    }
 }
 
 pub const MAX_KEY_REPEAT: u32 = 20;
@@ -90,13 +94,65 @@ pub fn normalize_key_repeat(repeat: Option<u32>) -> u32 {
     repeat.unwrap_or(1).clamp(1, MAX_KEY_REPEAT)
 }
 
+pub fn parse_key_event(event: Option<&str>) -> Result<Direction, String> {
+    match event.unwrap_or("click") {
+        "down" | "press" => Ok(Direction::Press),
+        "up" | "release" => Ok(Direction::Release),
+        "click" => Ok(Direction::Click),
+        other => Err(format!("未知按键事件: {other}")),
+    }
+}
+
 pub fn parse_key_action(action: &str) -> Result<Key, String> {
+    if action.len() == 1 {
+        let ch = action.chars().next().unwrap();
+        return Ok(Key::Unicode(ch));
+    }
+
     match action {
         "backspace" => Ok(Key::Backspace),
         "delete" => Ok(Key::Delete),
+        "enter" | "return" => Ok(Key::Return),
+        "tab" => Ok(Key::Tab),
+        "esc" | "escape" => Ok(Key::Escape),
+        "space" => Ok(Key::Space),
+        "ctrl" | "control" | "lcontrol" => Ok(Key::Control),
+        "shift" | "lshift" => Ok(Key::Shift),
+        "alt" | "lmenu" => Ok(Key::Alt),
+        "meta" | "win" | "windows" | "lwin" => Ok(Key::Meta),
         "cursor_left" | "left" => Ok(Key::LeftArrow),
         "cursor_right" | "right" => Ok(Key::RightArrow),
-        _ => Err(format!("未知按键动作: {action}")),
+        "cursor_up" | "up" => Ok(Key::UpArrow),
+        "cursor_down" | "down" => Ok(Key::DownArrow),
+        "home" => Ok(Key::Home),
+        "end" => Ok(Key::End),
+        "page_up" | "pageup" => Ok(Key::PageUp),
+        "page_down" | "pagedown" => Ok(Key::PageDown),
+        "caps_lock" | "capslock" => Ok(Key::CapsLock),
+        "minus" | "dash" => Ok(Key::Unicode('-')),
+        "equal" | "equals" => Ok(Key::Unicode('=')),
+        "left_bracket" | "lbracket" => Ok(Key::Unicode('[')),
+        "right_bracket" | "rbracket" => Ok(Key::Unicode(']')),
+        "backslash" => Ok(Key::Unicode('\\')),
+        "semicolon" => Ok(Key::Unicode(';')),
+        "quote" | "apostrophe" => Ok(Key::Unicode('\'')),
+        "comma" => Ok(Key::Unicode(',')),
+        "period" | "dot" => Ok(Key::Unicode('.')),
+        "slash" | "forward_slash" => Ok(Key::Unicode('/')),
+        "grave" | "backtick" => Ok(Key::Unicode('`')),
+        "f1" => Ok(Key::F1),
+        "f2" => Ok(Key::F2),
+        "f3" => Ok(Key::F3),
+        "f4" => Ok(Key::F4),
+        "f5" => Ok(Key::F5),
+        "f6" => Ok(Key::F6),
+        "f7" => Ok(Key::F7),
+        "f8" => Ok(Key::F8),
+        "f9" => Ok(Key::F9),
+        "f10" => Ok(Key::F10),
+        "f11" => Ok(Key::F11),
+        "f12" => Ok(Key::F12),
+        other => Err(format!("未知按键动作: {other}")),
     }
 }
 
@@ -115,4 +171,27 @@ fn scale_motion(dx: i16, dy: i16, sensitivity: f64, acceleration: f64) -> (i32, 
         (f64::from(dx) * sensitivity * accel).round() as i32,
         (f64::from(dy) * sensitivity * accel).round() as i32,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_letter_and_modifier_keys() {
+        assert!(matches!(parse_key_action("a"), Ok(Key::Unicode('a'))));
+        assert!(matches!(parse_key_action("A"), Ok(Key::Unicode('A'))));
+        assert!(matches!(parse_key_action("ctrl"), Ok(Key::Control)));
+        assert!(matches!(parse_key_action("meta"), Ok(Key::Meta)));
+        assert!(matches!(parse_key_action("enter"), Ok(Key::Return)));
+        assert!(matches!(parse_key_action("down"), Ok(Key::DownArrow)));
+    }
+
+    #[test]
+    fn parses_key_events() {
+        assert!(matches!(parse_key_event(None), Ok(Direction::Click)));
+        assert!(matches!(parse_key_event(Some("down")), Ok(Direction::Press)));
+        assert!(matches!(parse_key_event(Some("up")), Ok(Direction::Release)));
+        assert!(parse_key_event(Some("invalid")).is_err());
+    }
 }

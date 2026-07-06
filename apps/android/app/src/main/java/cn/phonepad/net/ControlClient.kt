@@ -31,6 +31,45 @@ object TextInputKeyAction {
     const val CURSOR_RIGHT = "cursor_right"
 }
 
+object KeyboardKeyEvent {
+    const val DOWN = "down"
+    const val UP = "up"
+    const val CLICK = "click"
+}
+
+object KeyboardKey {
+    const val CTRL = "ctrl"
+    const val SHIFT = "shift"
+    const val ALT = "alt"
+    const val META = "meta"
+    const val SPACE = "space"
+    const val ENTER = "enter"
+    const val TAB = "tab"
+    const val ESC = "esc"
+    const val BACKSPACE = "backspace"
+    const val DELETE = "delete"
+    const val CAPS_LOCK = "caps_lock"
+    const val MINUS = "minus"
+    const val EQUAL = "equal"
+    const val LEFT_BRACKET = "left_bracket"
+    const val RIGHT_BRACKET = "right_bracket"
+    const val BACKSLASH = "backslash"
+    const val SEMICOLON = "semicolon"
+    const val QUOTE = "quote"
+    const val COMMA = "comma"
+    const val PERIOD = "period"
+    const val SLASH = "slash"
+    const val GRAVE = "grave"
+    const val UP = "cursor_up"
+    const val DOWN = "cursor_down"
+    const val LEFT = "cursor_left"
+    const val RIGHT = "cursor_right"
+    const val HOME = "home"
+    const val END = "end"
+    const val PAGE_UP = "page_up"
+    const val PAGE_DOWN = "page_down"
+}
+
 class ControlClient {
     suspend fun fetchStatus(
         host: String,
@@ -79,12 +118,22 @@ class ControlClient {
         action: String,
         repeat: Int = 1,
         port: Int = Protocol.TCP_CONTROL_PORT,
+    ): ControlResponse = sendKeyboardKey(host, deviceId, secret, action, null, repeat, port)
+
+    suspend fun sendKeyboardKey(
+        host: String,
+        deviceId: String,
+        secret: String,
+        action: String,
+        event: String? = KeyboardKeyEvent.CLICK,
+        repeat: Int = 1,
+        port: Int = Protocol.TCP_CONTROL_PORT,
     ): ControlResponse = withContext(Dispatchers.IO) {
         runCatching {
             sendRequest(
                 host,
                 port,
-                buildRequest("key", deviceId, secret, action = action, repeat = repeat),
+                buildRequest("key", deviceId, secret, action = action, event = event, repeat = repeat),
             ) { jsonText ->
                 parseControlResponse(jsonText)
             } ?: ControlResponse(ok = false, error = "未收到桌面端响应")
@@ -107,6 +156,7 @@ class ControlClient {
         secret: String,
         content: String? = null,
         action: String? = null,
+        event: String? = null,
         repeat: Int? = null,
     ): String {
         val request = JSONObject()
@@ -118,6 +168,9 @@ class ControlClient {
         }
         if (action != null) {
             request.put("action", action)
+        }
+        if (event != null) {
+            request.put("event", event)
         }
         if (repeat != null && repeat > 1) {
             request.put("repeat", repeat)
