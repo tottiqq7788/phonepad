@@ -224,12 +224,12 @@ export default function App() {
 
         <article className="panel">
           <h2>配对</h2>
-          <p className="panel__desc">Android 端扫描下方二维码完成配对并获取连接密钥。</p>
+          <p className="panel__desc">Android 端扫描下方二维码，通过局域网自动发现本机地址并完成配对。</p>
           <div className="pairing-panel">
             {qrDataUrl ? <img className="qr-image" src={qrDataUrl} alt="配对二维码" /> : null}
             <div className="pairing-details">
-              <code className="pairing-code">{pairing?.connectionUrl || "未检测到可用网络，请检查 Wi-Fi 连接"}</code>
-              <p className="hint">设备 ID：{pairing?.deviceId ?? device?.deviceId ?? "—"}</p>
+              <code className="pairing-code">{pairing?.connectionUrl || "正在生成配对码…"}</code>
+              <p className="hint">推荐地址：{pairing?.recommendedIp || "—"} · 设备 ID：{pairing?.deviceId ?? device?.deviceId ?? "—"}</p>
             </div>
           </div>
         </article>

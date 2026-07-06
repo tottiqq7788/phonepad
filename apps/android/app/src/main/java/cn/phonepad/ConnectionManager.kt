@@ -8,6 +8,7 @@ import cn.phonepad.haptics.HapticsManager
 import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
 import cn.phonepad.net.ControlClient
+import cn.phonepad.net.DiscoveryClient
 import cn.phonepad.net.InputSender
 import cn.phonepad.net.PairingPayload
 import cn.phonepad.net.PairingUrlParser
@@ -152,12 +153,46 @@ class ConnectionManager(
         monitorJob?.cancel()
         focusSubscribeJob?.cancel()
         uiState = uiState.copy(error = null, showDevicePicker = false, connecting = true)
-        val status = controlClient.fetchStatus(
-            host = payload.host,
-            deviceId = payload.deviceId,
-            secret = payload.secret,
-            port = payload.tcpPort,
+
+        var resolved = resolvePayload(payload)
+        var host = resolved.host?.takeIf { it.isNotBlank() }
+        if (host == null) {
+            uiState = uiState.copy(
+                connected = false,
+                connecting = false,
+                error = "已扫码，但未在当前局域网发现桌面端，请确认接收服务已启动并检查防火墙。",
+            )
+            haptics.disconnected()
+            return
+        }
+
+        var status = controlClient.fetchStatus(
+            host = host,
+            deviceId = resolved.deviceId,
+            secret = resolved.secret,
+            port = resolved.tcpPort,
         )
+        if (status == null || !status.running) {
+            val rediscovered = DiscoveryClient.discover(
+                deviceId = payload.deviceId,
+                secret = payload.secret,
+                discoveryPort = payload.discoveryPort,
+            )
+            if (rediscovered != null) {
+                resolved = payload.copy(
+                    host = rediscovered.host,
+                    tcpPort = rediscovered.tcpPort,
+                    udpPort = rediscovered.udpPort,
+                )
+                host = rediscovered.host
+                status = controlClient.fetchStatus(
+                    host = host,
+                    deviceId = resolved.deviceId,
+                    secret = resolved.secret,
+                    port = resolved.tcpPort,
+                )
+            }
+        }
         if (status == null || !status.running) {
             uiState = uiState.copy(
                 connected = false,
@@ -180,9 +215,9 @@ class ConnectionManager(
         val device = PairedDevice(
             id = payload.deviceId,
             name = status.deviceName.ifBlank { payload.deviceName },
-            host = payload.host,
-            tcpPort = payload.tcpPort,
-            udpPort = payload.udpPort,
+            host = host,
+            tcpPort = resolved.tcpPort,
+            udpPort = resolved.udpPort,
             secret = payload.secret,
             lastConnectedAt = System.currentTimeMillis(),
             onlineState = DeviceOnlineState.Online,
@@ -191,8 +226,8 @@ class ConnectionManager(
         inputSender.setSecret(payload.secret)
         touchpadEngine.setTarget(
             ReceiverTarget(
-                host = payload.host,
-                udpPort = payload.udpPort,
+                host = host,
+                udpPort = resolved.udpPort,
                 deviceId = payload.deviceId,
                 deviceName = device.name,
             ),
@@ -203,7 +238,7 @@ class ConnectionManager(
             connecting = false,
             activeDeviceId = device.id,
             activeDeviceName = device.name,
-            host = payload.host,
+            host = host,
             lastRttMs = status.lastRttMs,
             packetsReceived = status.packetsReceived,
             error = null,
@@ -214,6 +249,23 @@ class ConnectionManager(
         if (fromScan) {
             refreshOnlineStates()
         }
+    }
+
+    private suspend fun resolvePayload(payload: PairingPayload): PairingPayload {
+        if (!payload.needsDiscovery()) {
+            return payload
+        }
+        val discovered = DiscoveryClient.discover(
+            deviceId = payload.deviceId,
+            secret = payload.secret,
+            discoveryPort = payload.discoveryPort,
+        ) ?: return payload
+        return payload.copy(
+            host = discovered.host,
+            tcpPort = discovered.tcpPort,
+            udpPort = discovered.udpPort,
+            deviceName = discovered.deviceName.ifBlank { payload.deviceName },
+        )
     }
 
     fun disconnect() {

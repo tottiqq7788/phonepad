@@ -18,15 +18,19 @@ class TouchpadEngine(
 ) {
     private var target: ReceiverTarget? = null
     private var pointerCount = 0
-    private var maxPointerCount = 0
     private var mode = Mode.Idle
     private var moved = false
+
+    private var sessionMaxPointerCount = 0
+    private var sessionMoved = false
+    private var sessionDownTime = 0L
+    private var sessionDownX = 0f
+    private var sessionDownY = 0f
+    private var twoFingerTapEligible = false
 
     private var downTime = 0L
     private var downX = 0f
     private var downY = 0f
-    private var lastX = 0f
-    private var lastY = 0f
     private var lastSentX = 0f
     private var lastSentY = 0f
 
@@ -53,12 +57,23 @@ class TouchpadEngine(
 
     fun onPointerDown(count: Int, x: Float, y: Float, eventTime: Long) {
         pointerCount = count
-        maxPointerCount = maxOf(maxPointerCount, count)
+        if (mode == Mode.Idle) {
+            sessionDownTime = eventTime
+            sessionDownX = x
+            sessionDownY = y
+            sessionMoved = false
+            sessionMaxPointerCount = count
+            twoFingerTapEligible = count == 2
+        } else {
+            sessionMaxPointerCount = maxOf(sessionMaxPointerCount, count)
+            if (count == 2 && mode == Mode.OneFinger) {
+                twoFingerTapEligible = false
+            }
+        }
+
         downTime = eventTime
         downX = x
         downY = y
-        lastX = x
-        lastY = y
         lastSentX = 0f
         lastSentY = 0f
         moved = false
@@ -83,6 +98,7 @@ class TouchpadEngine(
                 val dy = totalDy - lastSentY
                 if (dx.toInt() == 0 && dy.toInt() == 0) return
                 moved = true
+                sessionMoved = true
                 lastSentX = totalDx
                 lastSentY = totalDy
                 sender.send(
@@ -101,6 +117,7 @@ class TouchpadEngine(
                 if (!moved && hypot(totalDx, totalDy) < SCROLL_START_DISTANCE) return
                 if (hypot(dx, dy) < 1.5) return
                 moved = true
+                sessionMoved = true
                 lastSentX = totalDx
                 lastSentY = totalDy
                 sender.send(
@@ -112,50 +129,50 @@ class TouchpadEngine(
 
             else -> Unit
         }
-
-        lastX = x
-        lastY = y
     }
 
     fun onPointerUp(count: Int, x: Float, y: Float, eventTime: Long) {
-        val duration = eventTime - downTime
-        val distance = hypot(x - downX, y - downY)
         val host = target
 
         if (count == 0 && host != null) {
-            when (mode) {
-                Mode.OneFinger -> {
-                    if (!moved && maxPointerCount == 1 && duration <= TAP_MAX_DURATION && distance <= TAP_MAX_DISTANCE) {
-                        val now = System.currentTimeMillis() * 1000L
-                        sender.send(
-                            host.host,
-                            host.udpPort,
-                            Protocol.InputPacket.click(0, now, Protocol.MouseButton.Left, authToken = 0L),
-                        )
-                        haptics.leftClick()
-                    }
+            val duration = eventTime - sessionDownTime
+            val distance = hypot(x - sessionDownX, y - sessionDownY)
+            when {
+                !sessionMoved &&
+                    sessionMaxPointerCount == 1 &&
+                    duration <= TAP_MAX_DURATION &&
+                    distance <= TAP_MAX_DISTANCE -> {
+                    val now = System.currentTimeMillis() * 1000L
+                    sender.send(
+                        host.host,
+                        host.udpPort,
+                        Protocol.InputPacket.click(0, now, Protocol.MouseButton.Left, authToken = 0L),
+                    )
+                    haptics.leftClick()
                 }
 
-                Mode.TwoFinger -> {
-                    if (!moved && maxPointerCount == 2 && duration <= TAP_MAX_DURATION) {
-                        val now = System.currentTimeMillis() * 1000L
-                        sender.send(
-                            host.host,
-                            host.udpPort,
-                            Protocol.InputPacket.click(0, now, Protocol.MouseButton.Right, authToken = 0L),
-                        )
-                        haptics.rightClick()
-                    }
+                !sessionMoved &&
+                    sessionMaxPointerCount == 2 &&
+                    twoFingerTapEligible &&
+                    duration <= TAP_MAX_DURATION &&
+                    distance <= TAP_MAX_DISTANCE -> {
+                    val now = System.currentTimeMillis() * 1000L
+                    sender.send(
+                        host.host,
+                        host.udpPort,
+                        Protocol.InputPacket.click(0, now, Protocol.MouseButton.Right, authToken = 0L),
+                    )
+                    haptics.rightClick()
                 }
-
-                else -> Unit
             }
         }
 
         pointerCount = count
         if (count == 0) {
             mode = Mode.Idle
-            maxPointerCount = 0
+            sessionMaxPointerCount = 0
+            sessionMoved = false
+            twoFingerTapEligible = false
             moved = false
         } else {
             mode = when (count) {
@@ -163,7 +180,6 @@ class TouchpadEngine(
                 2 -> Mode.TwoFinger
                 else -> Mode.MultiFinger
             }
-            maxPointerCount = count
             downX = x
             downY = y
             downTime = eventTime

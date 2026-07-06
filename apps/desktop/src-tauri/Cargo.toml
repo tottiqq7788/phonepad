@@ -1,6 +1,6 @@
 [package]
 name = "phonepad-desktop"
-version = "0.5.1"
+version = "0.6.0"
 description = "Low-latency desktop receiver for PhonePad."
 authors = ["PhonePad"]
 license = "MIT"
@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 enigo = "0.2"
 local-ip-address = "0.6"
+default-net = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }

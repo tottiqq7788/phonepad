@@ -12,8 +12,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use phonepad_protocol::{
-    auth_token, ButtonAction, InputPacket, PacketKind, DISCOVERY_REQUEST, TCP_CONTROL_PORT,
-    UDP_DISCOVERY_PORT, UDP_INPUT_PORT,
+    auth_token, discover_request_auth, ButtonAction, DiscoverRequest, DiscoverResponse, InputPacket,
+    PacketKind, DISCOVERY_REQUEST, TCP_CONTROL_PORT, UDP_DISCOVERY_PORT, UDP_INPUT_PORT,
 };
 
 use crate::{
@@ -276,7 +276,7 @@ fn spawn_discovery_loop(
     status: Arc<Mutex<ReceiverStatus>>,
 ) {
     thread::spawn(move || {
-        let mut buf = [0u8; 128];
+        let mut buf = [0u8; 512];
 
         while !shutdown.load(Ordering::Relaxed) {
             let (len, peer) = match socket.recv_from(&mut buf) {
@@ -290,22 +290,49 @@ fn spawn_discovery_loop(
                 Err(_) => continue,
             };
 
-            if &buf[..len] != DISCOVERY_REQUEST {
-                continue;
-            }
-
             let ip = crate::pairing::discovery_response_ip(peer);
             if ip.is_empty() {
                 continue;
             }
-            let device_config = device.lock().unwrap();
+
+            let device_config = device.lock().unwrap().clone();
+            let running = status.lock().unwrap().running;
+
+            if let Ok(request) = serde_json::from_slice::<DiscoverRequest>(&buf[..len]) {
+                if request.request_type != "discover" {
+                    continue;
+                }
+                if request.device_id != device_config.device_id {
+                    continue;
+                }
+                if request.auth != discover_request_auth(&device_config.pairing_secret, request.nonce)
+                {
+                    continue;
+                }
+                let payload = DiscoverResponse::new(
+                    device_config.device_id.clone(),
+                    device_config.device_name.clone(),
+                    ip,
+                    &device_config.pairing_secret,
+                    request.nonce,
+                );
+                if let Ok(bytes) = serde_json::to_vec(&payload) {
+                    let _ = socket.send_to(&bytes, peer);
+                }
+                continue;
+            }
+
+            if &buf[..len] != DISCOVERY_REQUEST {
+                continue;
+            }
+
             let payload = serde_json::json!({
                 "name": device_config.device_name,
                 "ip": ip,
                 "udpPort": UDP_INPUT_PORT,
                 "tcpPort": TCP_CONTROL_PORT,
                 "discoveryPort": UDP_DISCOVERY_PORT,
-                "running": status.lock().unwrap().running,
+                "running": running,
                 "deviceId": device_config.device_id,
             });
             let _ = socket.send_to(payload.to_string().as_bytes(), peer);
@@ -708,5 +735,29 @@ mod tests {
         let text = payload.to_string();
         assert!(text.contains("focusState"));
         assert!(text.contains("editable"));
+    }
+
+    #[test]
+    fn discover_v2_request_auth_matches_protocol() {
+        use phonepad_protocol::{discover_request_auth, discover_response_auth};
+
+        let secret = "secret123";
+        let nonce = 42u32;
+        let request = DiscoverRequest {
+            request_type: "discover".into(),
+            version: 2,
+            device_id: "dev-1".into(),
+            nonce,
+            auth: discover_request_auth(secret, nonce),
+        };
+        assert_eq!(request.auth, discover_request_auth(secret, nonce));
+        let response = DiscoverResponse::new(
+            "dev-1".into(),
+            "PC".into(),
+            "10.0.0.1".into(),
+            secret,
+            nonce,
+        );
+        assert_eq!(response.auth, discover_response_auth(secret, nonce));
     }
 }

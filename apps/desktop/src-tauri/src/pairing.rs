@@ -25,16 +25,12 @@ pub fn build_pairing_info(device: &DeviceConfig, last_client: Option<&str>) -> P
     let recommended = select_recommended_ip(&candidates, last_client);
     let all_ips: Vec<String> = candidates.iter().map(|c| c.ip.to_string()).collect();
 
-    let connection_url = if recommended.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "phonepad://pair?host={recommended}&tcp={TCP_CONTROL_PORT}&udp={UDP_INPUT_PORT}&id={}&name={}&secret={}",
-            urlencoding::encode(&device.device_id),
-            urlencoding::encode(&device.device_name),
-            urlencoding::encode(&device.pairing_secret),
-        )
-    };
+    let connection_url = format!(
+        "phonepad://pair?tcp={TCP_CONTROL_PORT}&udp={UDP_INPUT_PORT}&discovery={UDP_DISCOVERY_PORT}&id={}&name={}&secret={}",
+        urlencoding::encode(&device.device_id),
+        urlencoding::encode(&device.device_name),
+        urlencoding::encode(&device.pairing_secret),
+    );
 
     PairingInfo {
         connection_url,
@@ -82,28 +78,140 @@ fn select_recommended_ip(candidates: &[IpCandidate], last_client: Option<&str>) 
         if let Some(ip) = client.split(':').next() {
             if let Ok(peer) = ip.parse::<Ipv4Addr>() {
                 if let Some(local) = local_ip_for_peer(peer) {
-                    return local.to_string();
+                    if !is_likely_virtual(local) {
+                        return local.to_string();
+                    }
                 }
             }
         }
     }
 
+    if let Some(ip) = recommended_ip_from_interfaces() {
+        return ip.to_string();
+    }
+
+    if let Some(ip) = outbound_ipv4() {
+        if candidates.iter().any(|c| c.ip == ip) {
+            return ip.to_string();
+        }
+    }
+
     candidates
         .iter()
+        .filter(|c| !is_likely_virtual(c.ip) && !c.ip.is_link_local())
         .max_by_key(|c| c.score)
         .map(|c| c.ip.to_string())
         .unwrap_or_default()
 }
 
 pub fn discovery_response_ip(peer: SocketAddr) -> String {
+    let peer_hint = peer.to_string();
     if let IpAddr::V4(peer_v4) = peer.ip() {
         if let Some(local) = local_ip_for_peer(peer_v4) {
-            return local.to_string();
+            if !is_likely_virtual(local) {
+                return local.to_string();
+            }
         }
+
+        let candidates = collect_ipv4_candidates();
+        if let Some(local) = candidates
+            .iter()
+            .find(|c| same_subnet(c.ip, peer_v4) && !is_likely_virtual(c.ip))
+        {
+            return local.ip.to_string();
+        }
+
+        return select_recommended_ip(&candidates, Some(&peer_hint));
     }
 
     let candidates = collect_ipv4_candidates();
-    select_recommended_ip(&candidates, None)
+    select_recommended_ip(&candidates, Some(&peer_hint))
+}
+
+fn same_subnet(local: Ipv4Addr, peer: Ipv4Addr) -> bool {
+    let lo = local.octets();
+    let pe = peer.octets();
+    if is_rfc1918(local) && is_rfc1918(peer) {
+        return lo[0] == pe[0] && lo[1] == pe[1] && lo[2] == pe[2];
+    }
+    lo[0] == pe[0] && lo[1] == pe[1]
+}
+
+fn recommended_ip_from_interfaces() -> Option<Ipv4Addr> {
+    let mut best: Option<(i32, Ipv4Addr)> = None;
+
+    for iface in default_net::get_interfaces() {
+        if !iface.is_up() || iface.is_loopback() || iface.is_tun() {
+            continue;
+        }
+        let label = iface.friendly_name.as_deref().unwrap_or(&iface.name);
+        if is_skipped_interface_name(label) {
+            continue;
+        }
+
+        if let Some(gateway) = &iface.gateway {
+            if let IpAddr::V4(gateway_ip) = gateway.ip_addr {
+                if let Some(local) = local_ip_for_peer(gateway_ip) {
+                    if !is_likely_virtual(local) {
+                        push_best(
+                            &mut best,
+                            score_ipv4(local) + wireless_bonus(label),
+                            local,
+                        );
+                    }
+                }
+            }
+        }
+
+        for v4 in &iface.ipv4 {
+            let ip = v4.addr;
+            if is_likely_virtual(ip) || ip.is_link_local() {
+                continue;
+            }
+            push_best(&mut best, score_ipv4(ip) + wireless_bonus(label), ip);
+        }
+    }
+
+    best.map(|(_, ip)| ip)
+}
+
+fn push_best(best: &mut Option<(i32, Ipv4Addr)>, score: i32, ip: Ipv4Addr) {
+    match best {
+        Some((best_score, _)) if score <= *best_score => {}
+        _ => *best = Some((score, ip)),
+    }
+}
+
+fn is_skipped_interface_name(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "mihomo", "meta", "tap", "tun", "wireguard", "vpn", "virtualbox", "vmware", "hyper-v",
+        "wsl", "loopback", "npcap", "bluetooth",
+    ]
+    .iter()
+    .any(|needle| n.contains(needle))
+}
+
+fn wireless_bonus(name: &str) -> i32 {
+    let n = name.to_ascii_lowercase();
+    if n.contains("wi-fi") || n.contains("wlan") || n.contains("wireless") || n.contains("无线") {
+        30
+    } else {
+        0
+    }
+}
+
+fn outbound_ipv4() -> Option<Ipv4Addr> {
+    for target in ["8.8.8.8", "1.1.1.1"] {
+        if let Ok(peer) = target.parse::<Ipv4Addr>() {
+            if let Some(local) = local_ip_for_peer(peer) {
+                if !is_likely_virtual(local) {
+                    return Some(local);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn local_ip_for_peer(peer: Ipv4Addr) -> Option<Ipv4Addr> {
@@ -117,16 +225,12 @@ fn local_ip_for_peer(peer: Ipv4Addr) -> Option<Ipv4Addr> {
 }
 
 fn score_ipv4(ip: Ipv4Addr) -> i32 {
-    let octets = ip.octets();
     let mut score = 0;
 
     if is_rfc1918(ip) {
         score += 100;
     }
-    if octets[0] == 192 && octets[1] == 168 {
-        score += 40;
-    }
-    if octets[0] == 10 {
+    if ip.octets()[0] == 10 {
         score += 20;
     }
     if is_likely_virtual(ip) {
@@ -159,41 +263,66 @@ mod tests {
     use crate::device_config::DeviceConfig;
 
     #[test]
-    fn returns_empty_when_no_candidates() {
-        let selected = select_recommended_ip(&[], None);
-        assert_eq!(selected, "");
+    fn virtual_ip_scores_lower_than_rfc1918() {
+        let virtual_ip = score_ipv4("198.10.0.1".parse().unwrap());
+        let lan_ip = score_ipv4("192.168.1.12".parse().unwrap());
+        assert!(lan_ip > virtual_ip);
     }
 
     #[test]
-    fn prefers_rfc1918_over_virtual() {
+    fn ten_network_scores_higher_than_192_168() {
+        let ten = score_ipv4("10.40.184.10".parse().unwrap());
+        let home = score_ipv4("192.168.1.12".parse().unwrap());
+        assert!(ten > home);
+    }
+
+    #[test]
+    fn uses_local_ip_for_last_client_peer() {
         let candidates = vec![
-            IpCandidate {
-                ip: "198.10.0.1".parse().unwrap(),
-                score: score_ipv4("198.10.0.1".parse().unwrap()),
-            },
             IpCandidate {
                 ip: "192.168.1.12".parse().unwrap(),
                 score: score_ipv4("192.168.1.12".parse().unwrap()),
             },
+            IpCandidate {
+                ip: "10.40.184.10".parse().unwrap(),
+                score: score_ipv4("10.40.184.10".parse().unwrap()),
+            },
         ];
-        let selected = select_recommended_ip(&candidates, None);
-        assert_eq!(selected, "192.168.1.12");
+        let selected = select_recommended_ip(&candidates, Some("10.40.184.236:45455"));
+        assert_eq!(selected, "10.40.184.10");
     }
 
     #[test]
-    fn pairing_url_contains_device_identity() {
+    fn discovery_response_prefers_same_subnet_fallback() {
+        let candidates = vec![
+            IpCandidate {
+                ip: "192.168.1.12".parse().unwrap(),
+                score: score_ipv4("192.168.1.12".parse().unwrap()),
+            },
+            IpCandidate {
+                ip: "10.40.184.10".parse().unwrap(),
+                score: score_ipv4("10.40.184.10".parse().unwrap()),
+            },
+        ];
+        let same_subnet = candidates
+            .iter()
+            .find(|c| same_subnet(c.ip, "10.40.184.236".parse().unwrap()))
+            .map(|c| c.ip.to_string());
+        assert_eq!(same_subnet.as_deref(), Some("10.40.184.10"));
+    }
+
+    #[test]
+    fn pairing_url_contains_device_identity_without_host() {
         let device = DeviceConfig {
             device_id: "dev-1".into(),
             device_name: "My PC".into(),
             pairing_secret: "secret123".into(),
         };
         let info = build_pairing_info(&device, None);
-        if info.connection_url.is_empty() {
-            assert!(info.recommended_ip.is_empty());
-        } else {
-            assert!(info.connection_url.contains("id=dev-1"));
-            assert!(info.connection_url.contains("secret=secret123"));
-            assert!(info.connection_url.contains("name=My"));
-        }
+        assert!(info.connection_url.contains("id=dev-1"));
+        assert!(info.connection_url.contains("secret=secret123"));
+        assert!(info.connection_url.contains("name=My"));
+        assert!(info.connection_url.contains("discovery=45456"));
+        assert!(!info.connection_url.contains("host="));
     }
 }

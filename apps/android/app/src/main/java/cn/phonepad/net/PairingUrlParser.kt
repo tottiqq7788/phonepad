@@ -6,11 +6,14 @@ import java.net.URLDecoder
 data class PairingPayload(
     val deviceId: String,
     val deviceName: String,
-    val host: String,
+    val host: String?,
     val tcpPort: Int,
     val udpPort: Int,
     val secret: String,
-)
+    val discoveryPort: Int = Protocol.UDP_DISCOVERY_PORT,
+) {
+    fun needsDiscovery(): Boolean = host.isNullOrBlank()
+}
 
 object PairingUrlParser {
     fun parse(raw: String): PairingPayload? {
@@ -38,14 +41,15 @@ object PairingUrlParser {
             params[key] = value
         }
 
-        val host = params["host"]?.trim().orEmpty()
+        val host = params["host"]?.trim()?.ifBlank { null }
         val deviceId = params["id"]?.trim().orEmpty()
         val secret = params["secret"]?.trim().orEmpty()
         val deviceName = params["name"]?.trim().orEmpty().ifBlank { "PhonePad Receiver" }
         val tcpPort = params["tcp"]?.toIntOrNull() ?: Protocol.TCP_CONTROL_PORT
         val udpPort = params["udp"]?.toIntOrNull() ?: Protocol.UDP_INPUT_PORT
+        val discoveryPort = params["discovery"]?.toIntOrNull() ?: Protocol.UDP_DISCOVERY_PORT
 
-        if (host.isBlank() || deviceId.isBlank() || secret.isBlank()) {
+        if (deviceId.isBlank() || secret.isBlank()) {
             return null
         }
 
@@ -56,6 +60,7 @@ object PairingUrlParser {
             tcpPort = tcpPort,
             udpPort = udpPort,
             secret = secret,
+            discoveryPort = discoveryPort,
         )
     }
 }

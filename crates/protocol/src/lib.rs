@@ -226,6 +226,61 @@ pub fn auth_token(secret: &str, sequence: u32) -> u64 {
     fnv1a64(&bytes)
 }
 
+pub fn discover_request_auth(secret: &str, nonce: u32) -> i64 {
+    auth_token(secret, nonce) as i64
+}
+
+pub fn discover_response_auth(secret: &str, nonce: u32) -> i64 {
+    auth_token(secret, nonce.wrapping_add(1)) as i64
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverRequest {
+    #[serde(rename = "type")]
+    pub request_type: String,
+    #[serde(default)]
+    pub version: u32,
+    pub device_id: String,
+    pub nonce: u32,
+    pub auth: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverResponse {
+    #[serde(rename = "type")]
+    pub response_type: String,
+    pub device_id: String,
+    pub name: String,
+    pub ip: String,
+    pub tcp_port: u16,
+    pub udp_port: u16,
+    pub discovery_port: u16,
+    pub auth: i64,
+}
+
+impl DiscoverResponse {
+    pub fn new(
+        device_id: String,
+        name: String,
+        ip: String,
+        secret: &str,
+        request_nonce: u32,
+    ) -> Self {
+        Self {
+            response_type: "discoverResponse".into(),
+            device_id,
+            name,
+            ip,
+            tcp_port: TCP_CONTROL_PORT,
+            udp_port: UDP_INPUT_PORT,
+            discovery_port: UDP_DISCOVERY_PORT,
+            auth: discover_response_auth(secret, request_nonce),
+        }
+    }
+}
+
 fn fnv1a64(data: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf29ce484222325;
     for byte in data {
@@ -268,5 +323,58 @@ mod tests {
         assert_eq!(bytes[3], PacketKind::Click as u8);
         assert_eq!(bytes[20], MouseButton::Right as u8);
         assert_eq!(bytes[24..32], token.to_le_bytes());
+    }
+
+    #[test]
+    fn discover_v2_auth_round_trip() {
+        let secret = "secret123";
+        let nonce = 42u32;
+        let request_auth = discover_request_auth(secret, nonce);
+        assert_eq!(request_auth, auth_token(secret, nonce) as i64);
+        let response_auth = discover_response_auth(secret, nonce);
+        assert_eq!(response_auth, auth_token(secret, nonce.wrapping_add(1)) as i64);
+        assert_ne!(request_auth, response_auth);
+    }
+
+    #[test]
+    fn discover_v2_auth_serializes_signed_json() {
+        let secret = "pair-secret";
+        let mut high_bit_nonce = None;
+        for nonce in 1..10_000u32 {
+            if auth_token(secret, nonce) > i64::MAX as u64 {
+                high_bit_nonce = Some(nonce);
+                break;
+            }
+        }
+        let nonce = high_bit_nonce.expect("expected a nonce with auth > i64::MAX");
+        let request = DiscoverRequest {
+            request_type: "discover".into(),
+            version: 2,
+            device_id: "dev-1".into(),
+            nonce,
+            auth: discover_request_auth(secret, nonce),
+        };
+        assert!(request.auth < 0);
+        let json = serde_json::to_string(&request).unwrap();
+        let parsed: DiscoverRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.auth, request.auth);
+    }
+
+    #[test]
+    fn discover_v2_request_json() {
+        let secret = "secret123";
+        let nonce = 7u32;
+        let request = DiscoverRequest {
+            request_type: "discover".into(),
+            version: 2,
+            device_id: "dev-1".into(),
+            nonce,
+            auth: discover_request_auth(secret, nonce),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"type\":\"discover\""));
+        assert!(json.contains("\"deviceId\":\"dev-1\""));
+        let parsed: DiscoverRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, request);
     }
 }

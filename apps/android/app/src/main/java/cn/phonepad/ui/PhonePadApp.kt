@@ -391,13 +391,19 @@ private fun TouchpadScreen(
                                     val ups = event.changes.count { it.changedToUp() }
                                     val prevCount = count + ups - downs
 
-                                    if (downs > 0 && prevCount == 0) {
+                                    if (downs > 0 && count > 0 && (prevCount == 0 || count != prevCount)) {
                                         val center = pressedCenter(pressed)
                                         engine.onPointerDown(count, center.first, center.second, time)
                                     }
                                     if (ups > 0) {
-                                        val upChange = event.changes.first { it.changedToUp() }
-                                        engine.onPointerUp(count, upChange.position.x, upChange.position.y, time)
+                                        val (upX, upY) = if (count > 0) {
+                                            val center = pressedCenter(pressed)
+                                            center.first to center.second
+                                        } else {
+                                            val upChange = event.changes.first { it.changedToUp() }
+                                            upChange.position.x to upChange.position.y
+                                        }
+                                        engine.onPointerUp(count, upX, upY, time)
                                     } else if (count > 0 && downs == 0) {
                                         val center = pressedCenter(pressed)
                                         engine.onPointerMove(count, center.first, center.second)

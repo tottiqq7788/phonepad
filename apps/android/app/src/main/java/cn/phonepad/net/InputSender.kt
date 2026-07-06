@@ -8,7 +8,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 
-class InputSender {
+open class InputSender {
     private val socket = DatagramSocket()
     private val sequence = AtomicInteger(0)
     private val executor = Executors.newSingleThreadExecutor { runnable ->
@@ -30,7 +30,7 @@ class InputSender {
         sequence.set(0)
     }
 
-    fun send(host: String, port: Int, packet: Protocol.InputPacket) {
+    open fun send(host: String, port: Int, packet: Protocol.InputPacket) {
         val nextSequence = sequence.incrementAndGet()
         val authToken = Protocol.authToken(secret, nextSequence)
         val payload = packet.copy(sequence = nextSequence, authToken = authToken).encode()
