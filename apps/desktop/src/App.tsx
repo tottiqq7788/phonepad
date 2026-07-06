@@ -58,6 +58,8 @@ export default function App() {
   const [deviceNameDraft, setDeviceNameDraft] = useState("");
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [autostartEnabled, setAutostartEnabled] = useState(false);
+  const [helpMessage, setHelpMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const packetRate = useMemo(() => {
@@ -127,6 +129,21 @@ export default function App() {
     }
   }
 
+  async function refreshAutostart() {
+    const enabled = await invoke<boolean>("autostart_status");
+    setAutostartEnabled(enabled);
+  }
+
+  async function toggleAutostart() {
+    setError(null);
+    try {
+      const next = await invoke<boolean>("set_autostart", { enabled: !autostartEnabled });
+      setAutostartEnabled(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   async function updateSettings(next: Settings) {
     setSettings(next);
     try {
@@ -141,7 +158,7 @@ export default function App() {
     refreshStatus().catch((err) => setError(String(err)));
     refreshDevice().catch((err) => setError(String(err)));
     refreshPairing().catch((err) => setError(String(err)));
-    startReceiver().catch((err) => setError(String(err)));
+    refreshAutostart().catch((err) => setError(String(err)));
 
     const timer = window.setInterval(() => {
       refreshStatus().catch(() => undefined);
@@ -152,9 +169,21 @@ export default function App() {
       unlisten = fn;
     });
 
+    let unlistenHelp: (() => void) | undefined;
+    listen<string>("tray://help", (event) => setHelpMessage(event.payload)).then((fn) => {
+      unlistenHelp = fn;
+    });
+
+    let unlistenError: (() => void) | undefined;
+    listen<string>("receiver://error", (event) => setError(String(event.payload))).then((fn) => {
+      unlistenError = fn;
+    });
+
     return () => {
       window.clearInterval(timer);
       unlisten?.();
+      unlistenHelp?.();
+      unlistenError?.();
     };
   }, []);
 
@@ -188,6 +217,7 @@ export default function App() {
       </header>
 
       {error ? <div className="error">{error}</div> : null}
+      {helpMessage ? <div className="notice">{helpMessage}</div> : null}
 
       <section className="console-grid">
         <article className="panel">
@@ -297,6 +327,16 @@ export default function App() {
               onChange={(event) => updateSettings({ ...settings, scrollSensitivity: Number(event.target.value) })}
             />
             <span>{settings.scrollSensitivity.toFixed(2)}</span>
+          </label>
+          <label className="toggle-field">
+            <span>开机自启</span>
+            <button
+              type="button"
+              className={`btn ${autostartEnabled ? "btn--primary" : ""}`}
+              onClick={toggleAutostart}
+            >
+              {autostartEnabled ? "已开启" : "已关闭"}
+            </button>
           </label>
         </article>
       </section>

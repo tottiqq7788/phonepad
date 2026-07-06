@@ -3,6 +3,8 @@ mod input;
 mod pairing;
 mod receiver;
 mod settings;
+mod state;
+mod tray;
 
 use std::{
     path::PathBuf,
@@ -11,16 +13,14 @@ use std::{
 
 use device_config::DeviceConfig;
 use pairing::PairingInfo;
-use receiver::{ReceiverHandle, ReceiverStatus};
+use receiver::ReceiverStatus;
 use settings::ReceiverSettings;
-use tauri::{Manager, State};
-
-struct AppState {
-    receiver: Mutex<Option<ReceiverHandle>>,
-    settings: Arc<Mutex<ReceiverSettings>>,
-    device: Arc<Mutex<DeviceConfig>>,
-    device_config_path: PathBuf,
-}
+use state::AppState;
+use tauri::{Manager, State, WindowEvent};
+#[cfg(target_os = "macos")]
+use tauri::RunEvent;
+use tauri_plugin_autostart::ManagerExt;
+use tray::{auto_start_receiver, refresh_tray_menu, setup_tray};
 
 fn device_config_path(app: &tauri::AppHandle) -> PathBuf {
     app.path()
@@ -39,56 +39,52 @@ fn start_receiver(
         *state.settings.lock().unwrap() = settings;
     }
 
-    if let Some(handle) = state.receiver.lock().unwrap().as_ref() {
-        return Ok(handle.snapshot());
+    {
+        let mut receiver_guard = state.receiver.lock().unwrap();
+        if let Some(handle) = receiver_guard.as_ref() {
+            if handle.snapshot().running {
+                let snapshot = handle.snapshot();
+                drop(receiver_guard);
+                let _ = refresh_tray_menu(&app);
+                return Ok(snapshot);
+            }
+            handle.stop();
+            *receiver_guard = None;
+        }
     }
 
     let handle = receiver::start(
-        app,
+        app.clone(),
         state.settings.clone(),
         state.device.clone(),
     )?;
     let snapshot = handle.snapshot();
     *state.receiver.lock().unwrap() = Some(handle);
+    let _ = refresh_tray_menu(&app);
     Ok(snapshot)
 }
 
 #[tauri::command]
-fn stop_receiver(state: State<'_, AppState>) -> ReceiverStatus {
-    let mut receiver = state.receiver.lock().unwrap();
-    if let Some(handle) = receiver.as_ref() {
-        handle.stop();
-    }
-    *receiver = None;
+fn stop_receiver(app: tauri::AppHandle, state: State<'_, AppState>) -> ReceiverStatus {
+    state.stop_receiver();
+    let _ = refresh_tray_menu(&app);
     ReceiverStatus::default()
 }
 
 #[tauri::command]
 fn receiver_status(state: State<'_, AppState>) -> ReceiverStatus {
-    state
-        .receiver
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|handle| handle.snapshot())
-        .unwrap_or_default()
+    state.receiver_snapshot()
 }
 
 #[tauri::command]
 fn update_settings(state: State<'_, AppState>, settings: ReceiverSettings) -> ReceiverStatus {
     *state.settings.lock().unwrap() = settings;
-    receiver_status(state)
+    state.receiver_snapshot()
 }
 
 #[tauri::command]
 fn pairing_info(state: State<'_, AppState>) -> PairingInfo {
-    let last_client = state
-        .receiver
-        .lock()
-        .unwrap()
-        .as_ref()
-        .map(|handle| handle.snapshot())
-        .and_then(|status| status.last_client);
+    let last_client = state.receiver_snapshot().last_client;
     pairing::build_pairing_info(&state.device.lock().unwrap(), last_client.as_deref())
 }
 
@@ -105,8 +101,30 @@ fn update_device_name(state: State<'_, AppState>, name: String) -> Result<Device
     Ok(device.clone())
 }
 
+#[tauri::command]
+fn autostart_status(app: tauri::AppHandle) -> Result<bool, String> {
+    app.autolaunch().is_enabled().map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    let autostart = app.autolaunch();
+    if enabled {
+        autostart.enable().map_err(|err| err.to_string())?;
+    } else {
+        autostart.disable().map_err(|err| err.to_string())?;
+    }
+    let _ = refresh_tray_menu(&app);
+    autostart.is_enabled().map_err(|err| err.to_string())
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .app_name("PhonePad Receiver")
+                .build(),
+        )
         .setup(|app| {
             let path = device_config_path(app.handle());
             let loaded = DeviceConfig::load(&path);
@@ -118,13 +136,36 @@ fn main() {
                 settings: Arc::new(Mutex::new(ReceiverSettings::default())),
                 device: Arc::new(Mutex::new(loaded.config)),
                 device_config_path: path,
+                should_exit: std::sync::atomic::AtomicBool::new(false),
             });
+
+            let app_handle = app.handle().clone();
+            if let Err(err) = auto_start_receiver(&app_handle) {
+                eprintln!("failed to auto-start receiver: {err}");
+            }
+
+            setup_tray(app)?;
+
+            if let Some(window) = app.get_webview_window("main") {
+                let window_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        let state = window_handle.state::<AppState>();
+                        if !state.should_exit() {
+                            api.prevent_close();
+                            tray::hide_console(&window_handle);
+                        }
+                    }
+                });
+            }
 
             #[cfg(target_os = "macos")]
             {
-                let window = app.get_webview_window("main").unwrap();
-                let _ = window.set_title("PhonePad Receiver - 请授予辅助功能权限");
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_title("PhonePad Receiver - 请授予辅助功能权限");
+                }
             }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -135,7 +176,17 @@ fn main() {
             pairing_info,
             device_info,
             update_device_name,
+            autostart_status,
+            set_autostart,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run PhonePad Receiver");
+        .build(tauri::generate_context!())
+        .expect("failed to run PhonePad Receiver")
+        .run(|app_handle, event| {
+            #[cfg(target_os = "macos")]
+            if let RunEvent::Reopen { .. } = event {
+                tray::show_console(app_handle);
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event);
+        });
 }

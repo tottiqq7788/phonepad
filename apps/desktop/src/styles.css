@@ -331,6 +331,16 @@ input {
   color: var(--text-primary);
 }
 
+.toggle-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
 input[type="range"] {
   width: 100%;
   accent-color: var(--accent);

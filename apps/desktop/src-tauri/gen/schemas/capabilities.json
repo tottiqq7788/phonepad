@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Default capabilities for PhonePad Receiver","local":true,"windows":["main"],"permissions":["core:default","autostart:default"]}}

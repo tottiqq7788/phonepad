@@ -237,6 +237,12 @@ fn ascii_letter_to_layout_key(ch: char) -> Option<Key> {
 
 pub const MAX_KEY_REPEAT: u32 = 20;
 
+pub fn reset_modifier_tracker() {
+    if let Ok(mut tracker) = MODIFIER_TRACKER.lock() {
+        *tracker = ModifierTracker::default();
+    }
+}
+
 pub fn normalize_key_repeat(repeat: Option<u32>) -> u32 {
     repeat.unwrap_or(1).clamp(1, MAX_KEY_REPEAT)
 }

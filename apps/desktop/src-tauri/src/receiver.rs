@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    thread,
+    thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -19,7 +19,7 @@ use phonepad_protocol::{
 
 use crate::{
     device_config::DeviceConfig,
-    input::{normalize_key_repeat, parse_key_action, parse_key_event, InputController},
+    input::{normalize_key_repeat, parse_key_action, parse_key_event, reset_modifier_tracker, InputController},
     settings::ReceiverSettings,
 };
 
@@ -88,6 +88,7 @@ struct ControlResponse {
 pub struct ReceiverHandle {
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
+    workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl ReceiverHandle {
@@ -98,6 +99,9 @@ impl ReceiverHandle {
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
         self.status.lock().unwrap().running = false;
+        for handle in self.workers.lock().unwrap().drain(..) {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -150,7 +154,7 @@ pub fn start(
         ..ReceiverStatus::default()
     }));
 
-    spawn_input_loop(
+    let input_handle = spawn_input_loop(
         app.clone(),
         udp_socket,
         settings.clone(),
@@ -158,10 +162,15 @@ pub fn start(
         shutdown.clone(),
         status.clone(),
     );
-    spawn_discovery_loop(discovery_socket, device.clone(), shutdown.clone(), status.clone());
-    spawn_control_loop(app, tcp_listener, device, shutdown.clone(), status.clone());
+    let discovery_handle =
+        spawn_discovery_loop(discovery_socket, device.clone(), shutdown.clone(), status.clone());
+    let control_handle = spawn_control_loop(app, tcp_listener, device, shutdown.clone(), status.clone());
 
-    Ok(ReceiverHandle { shutdown, status })
+    Ok(ReceiverHandle {
+        shutdown,
+        status,
+        workers: Mutex::new(vec![input_handle, discovery_handle, control_handle]),
+    })
 }
 
 fn spawn_input_loop(
@@ -171,7 +180,7 @@ fn spawn_input_loop(
     device: Arc<Mutex<DeviceConfig>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
-) {
+) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut input = match InputController::new() {
             Ok(input) => input,
@@ -218,6 +227,11 @@ fn spawn_input_loop(
             if last_peer != Some(peer) {
                 last_peer = Some(peer);
                 last_sequence = 0;
+                reset_modifier_tracker();
+            }
+
+            if packet.sequence == 1 && last_sequence > 0 {
+                last_sequence = 0;
             }
 
             if packet.sequence <= last_sequence
@@ -254,11 +268,22 @@ fn spawn_input_loop(
             let result = match packet.kind {
                 PacketKind::Move => input.move_mouse(packet.x, packet.y, &current_settings),
                 PacketKind::Scroll => input.scroll(packet.x, packet.y, &current_settings),
-                PacketKind::Click => packet.button.map_or(Ok(()), |button| input.click(button)),
+                PacketKind::Click => match packet.button {
+                    Some(button) => input.click(button),
+                    None => {
+                        status.lock().unwrap().packets_dropped += 1;
+                        continue;
+                    }
+                },
                 PacketKind::Button => {
-                    let button = packet.button;
                     let action = packet.action.unwrap_or(ButtonAction::Click);
-                    button.map_or(Ok(()), |button| input.button(button, action))
+                    match packet.button {
+                        Some(button) => input.button(button, action),
+                        None => {
+                            status.lock().unwrap().packets_dropped += 1;
+                            continue;
+                        }
+                    }
                 }
                 _ => Ok(()),
             };
@@ -267,7 +292,7 @@ fn spawn_input_loop(
                 let _ = app.emit("receiver://error", err);
             }
         }
-    });
+    })
 }
 
 fn spawn_discovery_loop(
@@ -275,7 +300,7 @@ fn spawn_discovery_loop(
     device: Arc<Mutex<DeviceConfig>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
-) {
+) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 512];
 
@@ -338,7 +363,7 @@ fn spawn_discovery_loop(
             });
             let _ = socket.send_to(payload.to_string().as_bytes(), peer);
         }
-    });
+    })
 }
 
 fn read_control_request(stream: &mut std::net::TcpStream) -> std::io::Result<(String, bool)> {
@@ -495,7 +520,7 @@ fn handle_control_connection(
 
     let device_config = device.lock().unwrap().clone();
     if !device_config.validate_secret(&request.device_id, &request.secret) {
-        if request.request_type == "text" || request.request_type == "key" {
+        if request.request_type == "text" || request.request_type == "key" || request.request_type == "status" {
             write_auth_failure(&mut stream);
         }
         return;
@@ -544,7 +569,15 @@ fn handle_control_connection(
                 status.lock().unwrap().last_client = Some(peer.to_string());
             }
         }
-        _ => {}
+        _ => {
+            write_control_response(
+                &mut stream,
+                &ControlResponse {
+                    ok: false,
+                    error: Some("未知请求类型".into()),
+                },
+            );
+        }
     }
 }
 
@@ -564,12 +597,12 @@ fn spawn_control_loop(
     device: Arc<Mutex<DeviceConfig>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
-) {
+) -> JoinHandle<()> {
     let input = match InputController::new() {
         Ok(controller) => Arc::new(Mutex::new(controller)),
         Err(err) => {
             let _ = app.emit("receiver://error", format!("无法初始化键盘控制器: {err}"));
-            return;
+            return thread::spawn(|| {});
         }
     };
 
@@ -594,7 +627,7 @@ fn spawn_control_loop(
                 }
             }
         }
-    });
+    })
 }
 
 fn estimate_rtt(timestamp_micros: u64) -> Option<f64> {

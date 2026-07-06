@@ -28,6 +28,7 @@ open class InputSender {
     fun setSecret(value: String) {
         secret = value
         sequence.set(0)
+        addressCache.clear()
     }
 
     open fun send(host: String, port: Int, packet: Protocol.InputPacket) {

@@ -158,6 +158,9 @@ class ConnectionManager(
 
     private suspend fun connectWithPayload(payload: PairingPayload, fromScan: Boolean) {
         monitorJob?.cancel()
+        releaseHeldKeyboardModifiers()
+        touchpadEngine.setTarget(null)
+        inputSender.setSecret("")
         uiState = uiState.copy(error = null, showDevicePicker = false, connecting = true)
 
         var resolved = resolvePayload(payload)
