@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
@@ -55,7 +55,7 @@ pub struct FileBeginResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upload_port: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<u64>,
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,7 +152,7 @@ impl FileTransferManager {
             ok: true,
             error: None,
             upload_port: Some(TCP_FILE_PORT),
-            token: Some(token),
+            token: Some(token.to_string()),
         })
     }
 
@@ -365,13 +365,15 @@ fn handle_file_upload(
         .map_err(|err| err.to_string())?;
 
     let mut header = [0u8; FILE_HEADER_LEN];
-    read_exact(&mut stream, &mut header)?;
+    if let Err(err) = read_exact(&mut stream, &mut header) {
+        return fail_upload(&mut stream, &err);
+    }
 
     if header[0..2] != FILE_MAGIC {
-        return write_upload_response(&mut stream, false, Some("无效文件头"));
+        return fail_upload(&mut stream, "无效文件头");
     }
     if header[2] != FILE_PROTOCOL_VERSION {
-        return write_upload_response(&mut stream, false, Some("不支持的文件协议版本"));
+        return fail_upload(&mut stream, "不支持的文件协议版本");
     }
 
     let token = u64::from_le_bytes(header[3..11].try_into().unwrap());
@@ -379,44 +381,61 @@ fn handle_file_upload(
         .trim_end_matches('\0')
         .to_string();
     if transfer_id.len() != TRANSFER_ID_LEN {
-        return write_upload_response(&mut stream, false, Some("transferId 无效"));
+        return fail_upload(&mut stream, "transferId 无效");
     }
 
-    let pending = manager
-        .pending_snapshot(&transfer_id)
-        .ok_or_else(|| "传输会话不存在".to_string())?;
+    let pending = match manager.pending_snapshot(&transfer_id) {
+        Some(pending) => pending,
+        None => return fail_upload(&mut stream, "传输会话不存在"),
+    };
     if pending.token != token {
-        return write_upload_response(&mut stream, false, Some("认证失败"));
+        return fail_upload(&mut stream, "认证失败");
     }
 
-    let mut file = File::create(&pending.part_path).map_err(|err| err.to_string())?;
+    let mut file = match File::create(&pending.part_path) {
+        Ok(file) => file,
+        Err(err) => return fail_upload(&mut stream, &format!("创建临时文件失败: {err}")),
+    };
     let mut remaining = pending.file_size;
     let mut buffer = [0u8; 64 * 1024];
 
     while remaining > 0 {
         let chunk = remaining.min(buffer.len() as u64) as usize;
-        let read = stream.read(&mut buffer[..chunk]).map_err(|err| err.to_string())?;
+        let read = match stream.read(&mut buffer[..chunk]) {
+            Ok(read) => read,
+            Err(err) => return fail_upload(&mut stream, &format!("读取上传数据失败: {err}")),
+        };
         if read == 0 {
             break;
         }
-        file.write_all(&buffer[..read])
-            .map_err(|err| err.to_string())?;
+        if let Err(err) = file.write_all(&buffer[..read]) {
+            return fail_upload(&mut stream, &format!("写入临时文件失败: {err}"));
+        }
         manager.attach_received_bytes(&transfer_id, read as u64);
         remaining -= read as u64;
     }
 
-    file.flush().map_err(|err| err.to_string())?;
+    if let Err(err) = file.flush() {
+        return fail_upload(&mut stream, &format!("写入临时文件失败: {err}"));
+    }
     drop(file);
 
-    let updated = manager
-        .pending_snapshot(&transfer_id)
-        .ok_or_else(|| "传输会话不存在".to_string())?;
+    let updated = match manager.pending_snapshot(&transfer_id) {
+        Some(pending) => pending,
+        None => return fail_upload(&mut stream, "传输会话不存在"),
+    };
     if updated.received != updated.file_size {
         manager.cancel_transfer(&transfer_id);
-        return write_upload_response(&mut stream, false, Some("文件未完整接收"));
+        return fail_upload(&mut stream, "文件未完整接收");
     }
 
     write_upload_response(&mut stream, true, None)
+}
+
+fn fail_upload(stream: &mut TcpStream, message: &str) -> Result<(), String> {
+    write_upload_response(stream, false, Some(message))?;
+    let _ = stream.shutdown(Shutdown::Both);
+    Ok(())
 }
 
 fn read_exact(stream: &mut TcpStream, buf: &mut [u8]) -> Result<(), String> {
@@ -537,5 +556,34 @@ mod tests {
         assert!(!manager.batches.lock().unwrap().contains_key(&batch_id));
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_begin_response_serializes_token_as_string() {
+        let response = FileBeginResponse {
+            ok: true,
+            error: None,
+            upload_port: Some(TCP_FILE_PORT),
+            token: Some("7123182144640608305".to_string()),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains(r#""token":"7123182144640608305""#));
+        assert!(!json.contains(r#""token":712"#));
+    }
+
+    #[test]
+    fn file_begin_token_preserves_u64_precision() {
+        let token = file_transfer_token(
+            "bc82aca27b624e13becb0174e10f8dce",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        );
+        let response = FileBeginResponse {
+            ok: true,
+            error: None,
+            upload_port: Some(TCP_FILE_PORT),
+            token: Some(token.to_string()),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains(&format!(r#""token":"{token}""#)));
     }
 }

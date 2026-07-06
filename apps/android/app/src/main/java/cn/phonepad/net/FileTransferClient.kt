@@ -12,8 +12,7 @@ import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import java.math.BigInteger
 import java.util.UUID
 
 data class SelectedAttachment(
@@ -40,7 +39,7 @@ data class FileTransferProgress(
 data class FileBeginResult(
     val ok: Boolean,
     val uploadPort: Int,
-    val token: Long,
+    val token: String,
     val error: String? = null,
 )
 
@@ -228,14 +227,23 @@ class FileTransferClient(
                 val jsonText = TcpStatusReader.readJson(socket.getInputStream()) ?: return FileBeginResult(
                     ok = false,
                     uploadPort = Protocol.TCP_FILE_PORT,
-                    token = 0L,
+                    token = "",
                     error = "未收到桌面端响应",
                 )
                 val json = JSONObject(jsonText)
+                val token = json.optString("token")
+                if (token.isBlank()) {
+                    return FileBeginResult(
+                        ok = false,
+                        uploadPort = Protocol.TCP_FILE_PORT,
+                        token = "",
+                        error = "桌面端未返回有效 token",
+                    )
+                }
                 FileBeginResult(
                     ok = json.optBoolean("ok"),
                     uploadPort = json.optInt("uploadPort", Protocol.TCP_FILE_PORT),
-                    token = json.optLong("token"),
+                    token = token,
                     error = json.optString("error").takeIf { it.isNotBlank() },
                 )
             }
@@ -243,7 +251,7 @@ class FileTransferClient(
             FileBeginResult(
                 ok = false,
                 uploadPort = Protocol.TCP_FILE_PORT,
-                token = 0L,
+                token = "",
                 error = err.message ?: "无法开始文件传输",
             )
         }
@@ -253,7 +261,7 @@ class FileTransferClient(
         context: Context,
         host: String,
         port: Int,
-        token: Long,
+        token: String,
         transferId: String,
         attachment: SelectedAttachment,
         onChunkSent: (Long) -> Unit,
@@ -360,16 +368,28 @@ class FileTransferClient(
         }
     }
 
-    private fun buildUploadHeader(token: Long, transferId: String): ByteArray {
+    private fun buildUploadHeader(token: String, transferId: String): ByteArray {
         val header = ByteArray(47)
         header[0] = 'P'.code.toByte()
         header[1] = 'F'.code.toByte()
         header[2] = 1
-        val tokenBytes = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).putLong(token).array()
+        val tokenBytes = tokenToLittleEndianBytes(token)
         System.arraycopy(tokenBytes, 0, header, 3, 8)
         val idBytes = transferId.toByteArray(Charsets.UTF_8)
         val copyLen = idBytes.size.coerceAtMost(36)
         System.arraycopy(idBytes, 0, header, 11, copyLen)
         return header
     }
+}
+
+internal fun tokenToLittleEndianBytes(token: String): ByteArray {
+    val value = BigInteger(token)
+    require(value.signum() >= 0 && value.bitLength() <= 64) { "invalid token" }
+    val out = ByteArray(8)
+    var current = value
+    for (index in 0 until 8) {
+        out[index] = (current and BigInteger.valueOf(0xFF)).toByte()
+        current = current shr 8
+    }
+    return out
 }
