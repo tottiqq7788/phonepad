@@ -1,13 +1,21 @@
 package cn.phonepad.storage
 
 import android.content.Context
+import android.content.SharedPreferences
+import androidx.security.crypto.EncryptedSharedPreferences
+import androidx.security.crypto.MasterKey
 import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
 import org.json.JSONArray
 import org.json.JSONObject
 
 class PairedDeviceStore(context: Context) {
-    private val prefs = context.getSharedPreferences("phonepad_devices", Context.MODE_PRIVATE)
+    private val appContext = context.applicationContext
+    private val prefs = createSecurePrefs(appContext)
+
+    init {
+        migrateLegacyPrefsIfNeeded()
+    }
 
     fun load(): List<PairedDevice> {
         val raw = prefs.getString(KEY_DEVICES, null) ?: return emptyList()
@@ -45,6 +53,16 @@ class PairedDeviceStore(context: Context) {
         return updated
     }
 
+    private fun migrateLegacyPrefsIfNeeded() {
+        if (prefs.contains(KEY_DEVICES)) {
+            return
+        }
+        val legacy = appContext.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = legacy.getString(KEY_DEVICES, null) ?: return
+        prefs.edit().putString(KEY_DEVICES, raw).apply()
+        legacy.edit().remove(KEY_DEVICES).apply()
+    }
+
     private fun PairedDevice.toJson(): JSONObject {
         return JSONObject()
             .put("id", id)
@@ -69,6 +87,21 @@ class PairedDeviceStore(context: Context) {
     }
 
     companion object {
+        private const val PREFS_NAME = "phonepad_devices_secure"
+        private const val LEGACY_PREFS_NAME = "phonepad_devices"
         private const val KEY_DEVICES = "paired_devices"
+
+        private fun createSecurePrefs(context: Context): SharedPreferences {
+            val masterKey = MasterKey.Builder(context)
+                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                .build()
+            return EncryptedSharedPreferences.create(
+                context,
+                PREFS_NAME,
+                masterKey,
+                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM,
+            )
+        }
     }
 }

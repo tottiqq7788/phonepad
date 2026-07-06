@@ -437,23 +437,70 @@ class ConnectionManager(
     private fun startMonitor(device: PairedDevice) {
         monitorJob?.cancel()
         monitorJob = scope.launch {
+            var currentDevice = device
+            var consecutiveFailures = 0
             while (isActive) {
-                val status = controlClient.fetchStatus(
-                    host = device.host,
-                    deviceId = device.id,
-                    secret = device.secret,
-                    port = device.tcpPort,
+                var status = controlClient.fetchStatus(
+                    host = currentDevice.host,
+                    deviceId = currentDevice.id,
+                    secret = currentDevice.secret,
+                    port = currentDevice.tcpPort,
                 )
                 if (status == null || !status.running) {
-                    disconnect()
-                    uiState = uiState.copy(error = "与 ${device.name} 的连接已断开。")
-                    break
+                    consecutiveFailures++
+                    if (consecutiveFailures >= 2) {
+                        val rediscovered = DiscoveryClient.discover(
+                            deviceId = currentDevice.id,
+                            secret = currentDevice.secret,
+                        )
+                        if (rediscovered != null) {
+                            val hostChanged = rediscovered.host != currentDevice.host
+                            currentDevice = currentDevice.copy(
+                                host = rediscovered.host,
+                                tcpPort = rediscovered.tcpPort,
+                                udpPort = rediscovered.udpPort,
+                                name = rediscovered.deviceName.ifBlank { currentDevice.name },
+                            )
+                            val devices = store.upsert(currentDevice)
+                            touchpadEngine.setTarget(
+                                ReceiverTarget(
+                                    host = currentDevice.host,
+                                    udpPort = currentDevice.udpPort,
+                                    deviceId = currentDevice.id,
+                                    deviceName = currentDevice.name,
+                                ),
+                            )
+                            uiState = uiState.copy(
+                                pairedDevices = devices,
+                                host = currentDevice.host,
+                                activeDeviceName = currentDevice.name,
+                            )
+                            status = controlClient.fetchStatus(
+                                host = currentDevice.host,
+                                deviceId = currentDevice.id,
+                                secret = currentDevice.secret,
+                                port = currentDevice.tcpPort,
+                            )
+                        }
+                    }
+                    if (status == null || !status.running) {
+                        if (consecutiveFailures >= 5) {
+                            disconnect()
+                            uiState = uiState.copy(error = "与 ${device.name} 的连接已断开。")
+                            break
+                        }
+                    } else {
+                        consecutiveFailures = 0
+                    }
+                } else {
+                    consecutiveFailures = 0
+                    uiState = uiState.copy(
+                        activeDeviceName = status.deviceName.ifBlank { currentDevice.name },
+                        lastRttMs = status.lastRttMs,
+                        packetsReceived = status.packetsReceived,
+                        error = null,
+                    )
                 }
-                uiState = uiState.copy(
-                    activeDeviceName = status.deviceName.ifBlank { device.name },
-                    lastRttMs = status.lastRttMs,
-                    packetsReceived = status.packetsReceived,
-                )
                 delay(1000)
             }
         }

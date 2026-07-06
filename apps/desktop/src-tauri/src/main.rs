@@ -1,6 +1,11 @@
+// Prevents additional console window on Windows in release, DO NOT REMOVE!!
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod device_config;
 mod input;
+mod notify;
 mod pairing;
+mod platform;
 mod receiver;
 mod settings;
 mod state;
@@ -11,11 +16,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use device_config::DeviceConfig;
-use pairing::PairingInfo;
-use receiver::ReceiverStatus;
-use settings::ReceiverSettings;
-use state::AppState;
+use crate::{
+    device_config::DeviceConfig,
+    input::InputController,
+    pairing::PairingInfo,
+    receiver::ReceiverStatus,
+    settings::ReceiverSettings,
+    state::AppState,
+};
 use tauri::{Manager, State, WindowEvent};
 #[cfg(target_os = "macos")]
 use tauri::RunEvent;
@@ -45,7 +53,9 @@ fn start_receiver(
             if handle.snapshot().running {
                 let snapshot = handle.snapshot();
                 drop(receiver_guard);
-                let _ = refresh_tray_menu(&app);
+                if let Err(err) = refresh_tray_menu(&app) {
+                    eprintln!("refresh tray menu failed: {err}");
+                }
                 return Ok(snapshot);
             }
             handle.stop();
@@ -57,17 +67,22 @@ fn start_receiver(
         app.clone(),
         state.settings.clone(),
         state.device.clone(),
+        state.input_controller.clone(),
     )?;
     let snapshot = handle.snapshot();
     *state.receiver.lock().unwrap() = Some(handle);
-    let _ = refresh_tray_menu(&app);
+    if let Err(err) = refresh_tray_menu(&app) {
+        eprintln!("refresh tray menu failed: {err}");
+    }
     Ok(snapshot)
 }
 
 #[tauri::command]
 fn stop_receiver(app: tauri::AppHandle, state: State<'_, AppState>) -> ReceiverStatus {
     state.stop_receiver();
-    let _ = refresh_tray_menu(&app);
+    if let Err(err) = refresh_tray_menu(&app) {
+        eprintln!("refresh tray menu failed: {err}");
+    }
     ReceiverStatus::default()
 }
 
@@ -114,34 +129,46 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
     } else {
         autostart.disable().map_err(|err| err.to_string())?;
     }
-    let _ = refresh_tray_menu(&app);
+    if let Err(err) = refresh_tray_menu(&app) {
+        eprintln!("refresh tray menu failed: {err}");
+    }
     autostart.is_enabled().map_err(|err| err.to_string())
 }
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .plugin(
             tauri_plugin_autostart::Builder::new()
                 .app_name("PhonePad Receiver")
                 .build(),
         )
         .setup(|app| {
+            platform::keep_process_responsive();
+
             let path = device_config_path(app.handle());
             let loaded = DeviceConfig::load(&path);
             if loaded.should_persist {
                 let _ = loaded.config.save(&path);
             }
+
+            let input_controller = Arc::new(Mutex::new(
+                InputController::new().map_err(|err| format!("无法初始化输入控制器: {err}"))?,
+            ));
+
             app.manage(AppState {
                 receiver: Mutex::new(None),
                 settings: Arc::new(Mutex::new(ReceiverSettings::default())),
                 device: Arc::new(Mutex::new(loaded.config)),
                 device_config_path: path,
                 should_exit: std::sync::atomic::AtomicBool::new(false),
+                input_controller,
             });
 
             let app_handle = app.handle().clone();
             if let Err(err) = auto_start_receiver(&app_handle) {
                 eprintln!("failed to auto-start receiver: {err}");
+                notify::show_error(&app_handle, &format!("接收服务启动失败: {err}"));
             }
 
             setup_tray(app)?;

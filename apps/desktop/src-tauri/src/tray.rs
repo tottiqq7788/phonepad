@@ -196,6 +196,7 @@ pub fn show_console(app: &AppHandle) {
 }
 
 pub fn hide_console(app: &AppHandle) {
+    crate::platform::keep_process_responsive();
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.hide();
     }
@@ -276,8 +277,13 @@ fn toggle_receiver(app: &AppHandle) -> Result<(), String> {
                 handle.stop();
             }
         }
-        let handle = receiver::start(app.clone(), state.settings.clone(), state.device.clone())
-            .map_err(|err| err.to_string())?;
+        let handle = receiver::start(
+            app.clone(),
+            state.settings.clone(),
+            state.device.clone(),
+            state.input_controller.clone(),
+        )
+        .map_err(|err| err.to_string())?;
         *state.receiver.lock().unwrap() = Some(handle);
     }
     refresh_tray_menu(app)
@@ -322,8 +328,13 @@ pub fn auto_start_receiver(app: &AppHandle) -> Result<ReceiverStatus, String> {
         }
     }
 
-    let handle = receiver::start(app.clone(), state.settings.clone(), state.device.clone())
-        .map_err(|err| err.to_string())?;
+    let handle = receiver::start(
+        app.clone(),
+        state.settings.clone(),
+        state.device.clone(),
+        state.input_controller.clone(),
+    )
+    .map_err(|err| err.to_string())?;
     let snapshot = handle.snapshot();
     *state.receiver.lock().unwrap() = Some(handle);
     Ok(snapshot)

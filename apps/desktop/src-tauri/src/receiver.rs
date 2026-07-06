@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use phonepad_protocol::{
     auth_token, discover_request_auth, ButtonAction, DiscoverRequest, DiscoverResponse, InputPacket,
-    PacketKind, DISCOVERY_REQUEST, TCP_CONTROL_PORT, UDP_DISCOVERY_PORT, UDP_INPUT_PORT,
+    PacketKind, TCP_CONTROL_PORT, UDP_DISCOVERY_PORT, UDP_INPUT_PORT,
 };
 
 use crate::{
@@ -127,6 +127,7 @@ pub fn start(
     app: AppHandle,
     settings: Arc<Mutex<ReceiverSettings>>,
     device: Arc<Mutex<DeviceConfig>>,
+    input: Arc<Mutex<InputController>>,
 ) -> Result<ReceiverHandle, String> {
     let udp_socket = UdpSocket::bind(("0.0.0.0", UDP_INPUT_PORT)).map_err(|err| err.to_string())?;
     udp_socket
@@ -159,12 +160,20 @@ pub fn start(
         udp_socket,
         settings.clone(),
         device.clone(),
+        input.clone(),
         shutdown.clone(),
         status.clone(),
     );
     let discovery_handle =
-        spawn_discovery_loop(discovery_socket, device.clone(), shutdown.clone(), status.clone());
-    let control_handle = spawn_control_loop(app, tcp_listener, device, shutdown.clone(), status.clone());
+        spawn_discovery_loop(discovery_socket, device.clone(), shutdown.clone());
+    let control_handle = spawn_control_loop(
+        app,
+        tcp_listener,
+        device,
+        input,
+        shutdown.clone(),
+        status.clone(),
+    );
 
     Ok(ReceiverHandle {
         shutdown,
@@ -178,18 +187,11 @@ fn spawn_input_loop(
     socket: UdpSocket,
     settings: Arc<Mutex<ReceiverSettings>>,
     device: Arc<Mutex<DeviceConfig>>,
+    input: Arc<Mutex<InputController>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let mut input = match InputController::new() {
-            Ok(input) => input,
-            Err(err) => {
-                status.lock().unwrap().running = false;
-                let _ = app.emit("receiver://error", err);
-                return;
-            }
-        };
         let mut buf = [0u8; 64];
         let mut last_sequence = 0u32;
         let mut last_peer: Option<SocketAddr> = None;
@@ -265,27 +267,36 @@ fn spawn_input_loop(
             }
 
             let current_settings = settings.lock().unwrap().clone();
-            let result = match packet.kind {
-                PacketKind::Move => input.move_mouse(packet.x, packet.y, &current_settings),
-                PacketKind::Scroll => input.scroll(packet.x, packet.y, &current_settings),
-                PacketKind::Click => match packet.button {
-                    Some(button) => input.click(button),
-                    None => {
+            let result = {
+                let mut controller = match input.lock() {
+                    Ok(controller) => controller,
+                    Err(_) => {
                         status.lock().unwrap().packets_dropped += 1;
                         continue;
                     }
-                },
-                PacketKind::Button => {
-                    let action = packet.action.unwrap_or(ButtonAction::Click);
-                    match packet.button {
-                        Some(button) => input.button(button, action),
+                };
+                match packet.kind {
+                    PacketKind::Move => controller.move_mouse(packet.x, packet.y, &current_settings),
+                    PacketKind::Scroll => controller.scroll(packet.x, packet.y, &current_settings),
+                    PacketKind::Click => match packet.button {
+                        Some(button) => controller.click(button),
                         None => {
                             status.lock().unwrap().packets_dropped += 1;
                             continue;
                         }
+                    },
+                    PacketKind::Button => {
+                        let action = packet.action.unwrap_or(ButtonAction::Click);
+                        match packet.button {
+                            Some(button) => controller.button(button, action),
+                            None => {
+                                status.lock().unwrap().packets_dropped += 1;
+                                continue;
+                            }
+                        }
                     }
+                    _ => Ok(()),
                 }
-                _ => Ok(()),
             };
 
             if let Err(err) = result {
@@ -299,7 +310,6 @@ fn spawn_discovery_loop(
     socket: UdpSocket,
     device: Arc<Mutex<DeviceConfig>>,
     shutdown: Arc<AtomicBool>,
-    status: Arc<Mutex<ReceiverStatus>>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let mut buf = [0u8; 512];
@@ -322,7 +332,6 @@ fn spawn_discovery_loop(
             }
 
             let device_config = device.lock().unwrap().clone();
-            let running = status.lock().unwrap().running;
 
             if let Ok(request) = serde_json::from_slice::<DiscoverRequest>(&buf[..len]) {
                 if request.request_type != "discover" {
@@ -345,23 +354,7 @@ fn spawn_discovery_loop(
                 if let Ok(bytes) = serde_json::to_vec(&payload) {
                     let _ = socket.send_to(&bytes, peer);
                 }
-                continue;
             }
-
-            if &buf[..len] != DISCOVERY_REQUEST {
-                continue;
-            }
-
-            let payload = serde_json::json!({
-                "name": device_config.device_name,
-                "ip": ip,
-                "udpPort": UDP_INPUT_PORT,
-                "tcpPort": TCP_CONTROL_PORT,
-                "discoveryPort": UDP_DISCOVERY_PORT,
-                "running": running,
-                "deviceId": device_config.device_id,
-            });
-            let _ = socket.send_to(payload.to_string().as_bytes(), peer);
         }
     })
 }
@@ -595,17 +588,10 @@ fn spawn_control_loop(
     app: AppHandle,
     listener: TcpListener,
     device: Arc<Mutex<DeviceConfig>>,
+    input: Arc<Mutex<InputController>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) -> JoinHandle<()> {
-    let input = match InputController::new() {
-        Ok(controller) => Arc::new(Mutex::new(controller)),
-        Err(err) => {
-            let _ = app.emit("receiver://error", format!("无法初始化键盘控制器: {err}"));
-            return thread::spawn(|| {});
-        }
-    };
-
     thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
             match listener.accept() {

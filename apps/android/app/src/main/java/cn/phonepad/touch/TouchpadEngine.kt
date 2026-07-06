@@ -4,6 +4,7 @@ import cn.phonepad.haptics.HapticsManager
 import cn.phonepad.net.InputSender
 import cn.phonepad.protocol.Protocol
 import kotlin.math.hypot
+import java.time.Instant
 
 data class ReceiverTarget(
     val host: String,
@@ -70,7 +71,7 @@ class TouchpadEngine(
     fun onPointerMove(count: Int, x: Float, y: Float) {
         pointerCount = count
         val host = target ?: return
-        val now = System.currentTimeMillis() * 1000L
+        val now = wallMicros()
 
         when (mode) {
             Mode.OneFinger -> {
@@ -125,7 +126,7 @@ class TouchpadEngine(
                     sessionMaxPointerCount == 1 &&
                     duration <= TAP_MAX_DURATION &&
                     distance <= TAP_MAX_DISTANCE -> {
-                    val now = System.currentTimeMillis() * 1000L
+                    val now = wallMicros()
                     sender.send(
                         host.host,
                         host.udpPort,
@@ -138,7 +139,7 @@ class TouchpadEngine(
                     sessionMaxPointerCount == 2 &&
                     twoFingerTapEligible &&
                     duration <= TAP_MAX_DURATION -> {
-                    val now = System.currentTimeMillis() * 1000L
+                    val now = wallMicros()
                     sender.send(
                         host.host,
                         host.udpPort,
@@ -182,5 +183,10 @@ class TouchpadEngine(
         private const val TAP_MAX_DURATION = 250L
         private const val TAP_MAX_DISTANCE = 14f
         private const val SCROLL_START_DISTANCE = 14f
+
+        private fun wallMicros(): Long {
+            val instant = Instant.now()
+            return instant.epochSecond * 1_000_000L + instant.nano / 1_000L
+        }
     }
 }

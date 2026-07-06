@@ -90,6 +90,7 @@ private val TextSecondary = Color(0xFF8B95A8)
 private val TextMuted = Color(0xFF5C6578)
 private val Accent = Color(0xFF5B9FD4)
 private val Success = Color(0xFF4ADE80)
+private val Warning = Color(0xFFFBBF24)
 private val ErrorColor = Color(0xFFF87171)
 private val TouchpadSurface = Color(0xFF0D0F14)
 private val RailWidth = 72.dp
@@ -773,6 +774,14 @@ private fun LeftRail(
     onToggleHelp: () -> Unit,
     onOpenDevicePicker: () -> Unit,
 ) {
+    val statusColor = when {
+        state.connecting -> Warning
+        !state.connected -> TextMuted
+        state.error != null -> ErrorColor
+        state.lastRttMs != null && state.lastRttMs > 120.0 -> Warning
+        else -> Success
+    }
+
     Column(
         modifier = Modifier
             .width(RailWidth)
@@ -788,7 +797,7 @@ private fun LeftRail(
             modifier = Modifier
                 .size(10.dp)
                 .clip(CircleShape)
-                .background(Success),
+                .background(statusColor),
         )
 
         Text(

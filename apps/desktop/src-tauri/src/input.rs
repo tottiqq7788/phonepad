@@ -196,7 +196,7 @@ fn apply_shift_char(ch: char) -> char {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn ascii_letter_to_layout_key(ch: char) -> Option<Key> {
     match ch.to_ascii_uppercase() {
         'A' => Some(Key::A),
@@ -229,7 +229,7 @@ fn ascii_letter_to_layout_key(ch: char) -> Option<Key> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 fn ascii_letter_to_layout_key(ch: char) -> Option<Key> {
     let _ = ch;
     None
@@ -369,7 +369,7 @@ mod tests {
         tracker.apply(Key::Control, Direction::Press);
         drop(tracker);
 
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         assert!(matches!(resolve_click_key(Key::Unicode('c')), Key::C));
 
         let mut tracker = MODIFIER_TRACKER.lock().unwrap();

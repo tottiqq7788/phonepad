@@ -11,6 +11,7 @@ use crate::{
     receiver::{ReceiverHandle, ReceiverStatus},
     settings::ReceiverSettings,
 };
+use crate::input::InputController;
 
 pub(crate) struct AppState {
     pub receiver: Mutex<Option<ReceiverHandle>>,
@@ -18,6 +19,7 @@ pub(crate) struct AppState {
     pub device: Arc<Mutex<DeviceConfig>>,
     pub device_config_path: PathBuf,
     pub should_exit: AtomicBool,
+    pub input_controller: Arc<Mutex<InputController>>,
 }
 
 impl AppState {
