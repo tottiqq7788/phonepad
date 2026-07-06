@@ -44,6 +44,13 @@ type Settings = {
   lowLatencyMode: boolean;
 };
 
+type PreferencesInfo = {
+  downloadDir: string;
+  defaultDownloadDir: string;
+  openFolderAfterTransfer: boolean;
+  usingDefaultDownloadDir: boolean;
+};
+
 const defaultSettings: Settings = {
   sensitivity: 1.0,
   acceleration: 0.18,
@@ -58,6 +65,7 @@ export default function App() {
   const [deviceNameDraft, setDeviceNameDraft] = useState("");
   const [qrDataUrl, setQrDataUrl] = useState<string>("");
   const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [preferences, setPreferences] = useState<PreferencesInfo | null>(null);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [helpMessage, setHelpMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -154,11 +162,51 @@ export default function App() {
     }
   }
 
+  async function refreshPreferences() {
+    const next = await invoke<PreferencesInfo>("preferences_info");
+    setPreferences(next);
+  }
+
+  async function pickDownloadDir() {
+    setError(null);
+    try {
+      const next = await invoke<PreferencesInfo>("pick_download_dir");
+      setPreferences(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function resetDownloadDir() {
+    setError(null);
+    try {
+      const next = await invoke<PreferencesInfo>("reset_download_dir");
+      setPreferences(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function toggleOpenFolderAfterTransfer() {
+    if (!preferences) return;
+    setError(null);
+    try {
+      const next = await invoke<PreferencesInfo>("update_preferences", {
+        downloadDir: preferences.usingDefaultDownloadDir ? null : preferences.downloadDir,
+        openFolderAfterTransfer: !preferences.openFolderAfterTransfer,
+      });
+      setPreferences(next);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
   useEffect(() => {
     refreshStatus().catch((err) => setError(String(err)));
     refreshDevice().catch((err) => setError(String(err)));
     refreshPairing().catch((err) => setError(String(err)));
     refreshAutostart().catch((err) => setError(String(err)));
+    refreshPreferences().catch((err) => setError(String(err)));
 
     const timer = window.setInterval(() => {
       refreshStatus().catch(() => undefined);
@@ -291,6 +339,39 @@ export default function App() {
         </article>
 
         <article className="panel">
+          <h2>文件接收设置</h2>
+          <dl className="meta-grid">
+            <dt>保存位置</dt>
+            <dd>{preferences?.downloadDir ?? "加载中…"}</dd>
+            <dt>默认位置</dt>
+            <dd>{preferences?.defaultDownloadDir ?? "—"}</dd>
+          </dl>
+          <div className="device-name-inline">
+            <button type="button" className="btn btn--primary btn--compact" onClick={pickDownloadDir}>
+              选择目录
+            </button>
+            <button
+              type="button"
+              className="btn btn--compact"
+              onClick={resetDownloadDir}
+              disabled={preferences?.usingDefaultDownloadDir}
+            >
+              恢复默认文档目录
+            </button>
+          </div>
+          <label className="toggle-field">
+            <span>传输完成后自动打开文件夹</span>
+            <button
+              type="button"
+              className={`btn ${preferences?.openFolderAfterTransfer ? "btn--primary" : ""}`}
+              onClick={toggleOpenFolderAfterTransfer}
+            >
+              {preferences?.openFolderAfterTransfer ? "已开启" : "已关闭"}
+            </button>
+          </label>
+        </article>
+
+        <article className="panel">
           <h2>手感设置</h2>
           <label className="slider-field">
             灵敏度
@@ -344,7 +425,7 @@ export default function App() {
       <section className="notice">
         <strong>macOS：</strong>需在「系统设置 → 隐私与安全性 → 辅助功能」中允许本应用控制电脑。
         <br />
-        <strong>Windows：</strong>首次启动请允许 UDP 45454 / TCP 45455 通过防火墙。
+        <strong>Windows：</strong>首次启动请允许 UDP 45454 / TCP 45455 / TCP 45457 通过防火墙。
       </section>
     </main>
   );

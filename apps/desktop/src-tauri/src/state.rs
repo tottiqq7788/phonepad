@@ -8,6 +8,8 @@ use std::{
 
 use crate::{
     device_config::DeviceConfig,
+    file_transfer::FileTransferManager,
+    preferences::AppPreferences,
     receiver::{ReceiverHandle, ReceiverStatus},
     settings::ReceiverSettings,
 };
@@ -16,8 +18,11 @@ use crate::input::InputController;
 pub(crate) struct AppState {
     pub receiver: Mutex<Option<ReceiverHandle>>,
     pub settings: Arc<Mutex<ReceiverSettings>>,
+    pub preferences: Arc<Mutex<AppPreferences>>,
+    pub file_transfer: Arc<FileTransferManager>,
     pub device: Arc<Mutex<DeviceConfig>>,
     pub device_config_path: PathBuf,
+    pub preferences_path: PathBuf,
     pub should_exit: AtomicBool,
     pub input_controller: Arc<Mutex<InputController>>,
 }

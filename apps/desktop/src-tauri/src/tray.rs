@@ -282,6 +282,8 @@ fn toggle_receiver(app: &AppHandle) -> Result<(), String> {
             state.settings.clone(),
             state.device.clone(),
             state.input_controller.clone(),
+            state.preferences.clone(),
+            state.file_transfer.clone(),
         )
         .map_err(|err| err.to_string())?;
         *state.receiver.lock().unwrap() = Some(handle);
@@ -304,7 +306,7 @@ fn show_help(app: &AppHandle) {
     show_console(app);
     let _ = app.emit(
         "tray://help",
-        "PhonePad Receiver 正在后台运行。Android 端请扫码配对；Windows 需放行 UDP 45454 / TCP 45455。",
+        "PhonePad Receiver 正在后台运行。Android 端请扫码配对；Windows 需放行 UDP 45454 / TCP 45455 / TCP 45457。",
     );
 }
 
@@ -333,6 +335,8 @@ pub fn auto_start_receiver(app: &AppHandle) -> Result<ReceiverStatus, String> {
         state.settings.clone(),
         state.device.clone(),
         state.input_controller.clone(),
+        state.preferences.clone(),
+        state.file_transfer.clone(),
     )
     .map_err(|err| err.to_string())?;
     let snapshot = handle.snapshot();

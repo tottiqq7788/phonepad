@@ -5,6 +5,7 @@ pub const VERSION: u8 = 2;
 pub const PACKET_LEN: usize = 32;
 pub const UDP_INPUT_PORT: u16 = 45454;
 pub const TCP_CONTROL_PORT: u16 = 45455;
+pub const TCP_FILE_PORT: u16 = 45457;
 pub const UDP_DISCOVERY_PORT: u16 = 45456;
 pub const DISCOVERY_REQUEST: &[u8] = b"PHONEPAD_DISCOVER_V1";
 
@@ -230,6 +231,12 @@ pub fn discover_request_auth(secret: &str, nonce: u32) -> i64 {
     auth_token(secret, nonce) as i64
 }
 
+pub fn file_transfer_token(secret: &str, transfer_id: &str) -> u64 {
+    let mut bytes = secret.as_bytes().to_vec();
+    bytes.extend_from_slice(transfer_id.as_bytes());
+    fnv1a64(&bytes)
+}
+
 pub fn discover_response_auth(secret: &str, nonce: u32) -> i64 {
     auth_token(secret, nonce.wrapping_add(1)) as i64
 }
@@ -323,6 +330,18 @@ mod tests {
         assert_eq!(bytes[3], PacketKind::Click as u8);
         assert_eq!(bytes[20], MouseButton::Right as u8);
         assert_eq!(bytes[24..32], token.to_le_bytes());
+    }
+
+    #[test]
+    fn file_transfer_token_is_deterministic() {
+        assert_eq!(
+            file_transfer_token("secret", "transfer-1"),
+            file_transfer_token("secret", "transfer-1")
+        );
+        assert_ne!(
+            file_transfer_token("secret", "transfer-1"),
+            file_transfer_token("secret", "transfer-2")
+        );
     }
 
     #[test]

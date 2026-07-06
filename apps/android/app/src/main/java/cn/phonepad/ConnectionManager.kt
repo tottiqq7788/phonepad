@@ -9,8 +9,11 @@ import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
 import cn.phonepad.net.ControlClient
 import cn.phonepad.net.DiscoveryClient
+import cn.phonepad.net.FileTransferClient
+import cn.phonepad.net.FileTransferProgress
 import cn.phonepad.net.KeyboardKey
 import cn.phonepad.net.KeyboardKeyEvent
+import cn.phonepad.net.SelectedAttachment
 import cn.phonepad.net.InputSender
 import cn.phonepad.net.PairingPayload
 import cn.phonepad.net.PairingUrlParser
@@ -40,14 +43,18 @@ data class ConnectionUiState(
     val showDevicePicker: Boolean = false,
     val textSending: Boolean = false,
     val textInputError: String? = null,
+    val transferSending: Boolean = false,
+    val transferProgress: FileTransferProgress? = null,
 )
 
 class ConnectionManager(
     context: Context,
     private val scope: CoroutineScope,
 ) {
-    private val store = PairedDeviceStore(context.applicationContext)
+    private val appContext = context.applicationContext
+    private val store = PairedDeviceStore(appContext)
     private val controlClient = ControlClient()
+    private val fileTransferClient = FileTransferClient()
     private val inputSender = InputSender()
     private val haptics = HapticsManager(context)
     val touchpadEngine = TouchpadEngine(inputSender, haptics)
@@ -59,6 +66,9 @@ class ConnectionManager(
     private var onlineJob: Job? = null
     private var onlineRefreshJob: Job? = null
     private var textSendJob: Job? = null
+    private var transferJob: Job? = null
+    @Volatile
+    private var transferCancelled = false
     private val keyboardSendMutex = Mutex()
     private val heldModifiers = mutableSetOf<String>()
 
@@ -157,6 +167,7 @@ class ConnectionManager(
     }
 
     private suspend fun connectWithPayload(payload: PairingPayload, fromScan: Boolean) {
+        stopActiveTransfer()
         monitorJob?.cancel()
         releaseHeldKeyboardModifiers()
         touchpadEngine.setTarget(null)
@@ -277,6 +288,7 @@ class ConnectionManager(
     }
 
     fun disconnect() {
+        stopActiveTransfer()
         releaseHeldKeyboardModifiers()
         monitorJob?.cancel()
         textSendJob?.cancel()
@@ -293,6 +305,8 @@ class ConnectionManager(
             showDevicePicker = false,
             textSending = false,
             textInputError = null,
+            transferSending = false,
+            transferProgress = null,
         )
         haptics.disconnected()
         refreshOnlineStates()
@@ -309,6 +323,143 @@ class ConnectionManager(
 
     fun clearTextInputError() {
         uiState = uiState.copy(textInputError = null)
+    }
+
+    fun setTextInputError(message: String) {
+        uiState = uiState.copy(textInputError = message)
+    }
+
+    private fun stopActiveTransfer() {
+        transferCancelled = true
+        transferJob?.cancel()
+    }
+
+    fun sendInputModeContent(
+        text: String,
+        attachments: List<SelectedAttachment>,
+        onTextCleared: () -> Unit = {},
+        onCompleted: () -> Unit = {},
+    ) {
+        if (uiState.textSending || uiState.transferSending) {
+            return
+        }
+        val trimmed = text.trim()
+        if (trimmed.isEmpty() && attachments.isEmpty()) {
+            uiState = uiState.copy(textInputError = "请输入内容或选择附件")
+            return
+        }
+
+        transferJob?.cancel()
+        transferCancelled = false
+        transferJob = scope.launch {
+            if (!uiState.connected || uiState.activeDeviceId.isBlank()) {
+                uiState = uiState.copy(textInputError = "设备未连接")
+                return@launch
+            }
+            val device = store.load().firstOrNull { it.id == uiState.activeDeviceId } ?: run {
+                uiState = uiState.copy(textInputError = "设备不存在，请重新连接")
+                return@launch
+            }
+
+            uiState = uiState.copy(textInputError = null)
+
+            if (trimmed.isNotEmpty()) {
+                if (trimmed.length > MAX_TEXT_CHARS) {
+                    uiState = uiState.copy(textInputError = "文本超过 $MAX_TEXT_CHARS 字符限制")
+                    return@launch
+                }
+                if (trimmed.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) {
+                    uiState = uiState.copy(textInputError = "文本过长，请缩短后重试")
+                    return@launch
+                }
+                uiState = uiState.copy(textSending = true)
+                val textResponse = controlClient.sendText(
+                    host = device.host,
+                    deviceId = device.id,
+                    secret = device.secret,
+                    port = device.tcpPort,
+                    text = trimmed,
+                )
+                if (!isActive || !uiState.connected || transferCancelled) {
+                    uiState = uiState.copy(textSending = false, transferSending = false, transferProgress = null)
+                    return@launch
+                }
+                if (!textResponse.ok) {
+                    uiState = uiState.copy(
+                        textSending = false,
+                        textInputError = textResponse.error ?: "文本发送失败",
+                    )
+                    return@launch
+                }
+                haptics.textSent()
+                uiState = uiState.copy(textSending = false)
+                onTextCleared()
+            }
+
+            if (attachments.isNotEmpty()) {
+                uiState = uiState.copy(
+                    transferSending = true,
+                    transferProgress = FileTransferProgress(
+                        batchId = "",
+                        currentIndex = 0,
+                        totalFiles = attachments.size,
+                        currentFileName = attachments.first().displayName,
+                        sentBytes = 0,
+                        totalBytes = attachments.sumOf { it.size },
+                        fileSentBytes = 0,
+                        fileTotalBytes = attachments.first().size,
+                    ),
+                )
+                val response = fileTransferClient.uploadAttachments(
+                    context = appContext,
+                    host = device.host,
+                    deviceId = device.id,
+                    secret = device.secret,
+                    tcpPort = device.tcpPort,
+                    attachments = attachments,
+                    onProgress = { progress ->
+                        if (isActive && !transferCancelled) {
+                            uiState = uiState.copy(transferProgress = progress)
+                        }
+                    },
+                    isCancelled = { transferCancelled || !isActive },
+                )
+                if (!isActive || !uiState.connected) {
+                    uiState = uiState.copy(
+                        transferSending = false,
+                        transferProgress = null,
+                        textInputError = if (transferCancelled) null else "传输已中断",
+                    )
+                    return@launch
+                }
+                if (response.ok && !transferCancelled) {
+                    haptics.textSent()
+                    uiState = uiState.copy(
+                        transferSending = false,
+                        transferProgress = null,
+                        textInputError = null,
+                    )
+                    onCompleted()
+                } else {
+                    uiState = uiState.copy(
+                        transferSending = false,
+                        transferProgress = null,
+                        textInputError = response.error ?: "附件发送失败",
+                    )
+                }
+            } else {
+                onCompleted()
+            }
+        }
+    }
+
+    fun cancelTransfer() {
+        stopActiveTransfer()
+        uiState = uiState.copy(
+            transferSending = false,
+            transferProgress = null,
+            textSending = false,
+        )
     }
 
     fun sendTextToActiveDevice(text: String, onSuccess: () -> Unit = {}) {
@@ -507,6 +658,7 @@ class ConnectionManager(
     }
 
     fun release() {
+        stopActiveTransfer()
         monitorJob?.cancel()
         onlineJob?.cancel()
         textSendJob?.cancel()

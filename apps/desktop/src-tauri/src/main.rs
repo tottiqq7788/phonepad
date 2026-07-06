@@ -2,10 +2,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod device_config;
+mod file_transfer;
 mod input;
 mod notify;
 mod pairing;
 mod platform;
+mod preferences;
 mod receiver;
 mod settings;
 mod state;
@@ -18,8 +20,10 @@ use std::{
 
 use crate::{
     device_config::DeviceConfig,
+    file_transfer::FileTransferManager,
     input::InputController,
     pairing::PairingInfo,
+    preferences::AppPreferences,
     receiver::ReceiverStatus,
     settings::ReceiverSettings,
     state::AppState,
@@ -35,6 +39,22 @@ fn device_config_path(app: &tauri::AppHandle) -> PathBuf {
         .app_config_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("device.json")
+}
+
+fn preferences_path(app: &tauri::AppHandle) -> PathBuf {
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("preferences.json")
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreferencesInfo {
+    download_dir: String,
+    default_download_dir: String,
+    open_folder_after_transfer: bool,
+    using_default_download_dir: bool,
 }
 
 #[tauri::command]
@@ -68,6 +88,8 @@ fn start_receiver(
         state.settings.clone(),
         state.device.clone(),
         state.input_controller.clone(),
+        state.preferences.clone(),
+        state.file_transfer.clone(),
     )?;
     let snapshot = handle.snapshot();
     *state.receiver.lock().unwrap() = Some(handle);
@@ -135,6 +157,66 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
     autostart.is_enabled().map_err(|err| err.to_string())
 }
 
+fn build_preferences_info(state: &AppState) -> PreferencesInfo {
+    let default_dir = platform::default_download_dir()
+        .unwrap_or_else(|| state.config_dir().join("downloads"));
+    let preferences = state.preferences.lock().unwrap().clone();
+    let resolved = preferences.resolved_download_dir(&default_dir);
+    PreferencesInfo {
+        download_dir: resolved.to_string_lossy().to_string(),
+        default_download_dir: default_dir.to_string_lossy().to_string(),
+        open_folder_after_transfer: preferences.open_folder_after_transfer,
+        using_default_download_dir: preferences.download_dir.is_none(),
+    }
+}
+
+#[tauri::command]
+fn preferences_info(state: State<'_, AppState>) -> PreferencesInfo {
+    build_preferences_info(&state)
+}
+
+#[tauri::command]
+fn update_preferences(
+    state: State<'_, AppState>,
+    download_dir: Option<String>,
+    open_folder_after_transfer: bool,
+) -> Result<PreferencesInfo, String> {
+    {
+        let mut preferences = state.preferences.lock().unwrap();
+        preferences.download_dir = download_dir
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        preferences.open_folder_after_transfer = open_folder_after_transfer;
+        preferences.save(&state.preferences_path)?;
+    }
+    Ok(build_preferences_info(&state))
+}
+
+#[tauri::command]
+fn pick_download_dir(state: State<'_, AppState>) -> Result<PreferencesInfo, String> {
+    let open_folder = state.preferences.lock().unwrap().open_folder_after_transfer;
+    let picked = platform::pick_folder_dialog().ok_or_else(|| "未选择目录".to_string())?;
+    {
+        let mut preferences = state.preferences.lock().unwrap();
+        preferences.download_dir = Some(picked.to_string_lossy().to_string());
+        preferences.open_folder_after_transfer = open_folder;
+        preferences.save(&state.preferences_path)?;
+    }
+    Ok(build_preferences_info(&state))
+}
+
+#[tauri::command]
+fn reset_download_dir(state: State<'_, AppState>) -> Result<PreferencesInfo, String> {
+    let open_folder = state.preferences.lock().unwrap().open_folder_after_transfer;
+    {
+        let mut preferences = state.preferences.lock().unwrap();
+        preferences.download_dir = None;
+        preferences.open_folder_after_transfer = open_folder;
+        preferences.save(&state.preferences_path)?;
+    }
+    Ok(build_preferences_info(&state))
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
@@ -147,20 +229,29 @@ fn main() {
             platform::keep_process_responsive();
 
             let path = device_config_path(app.handle());
+            let prefs_path = preferences_path(app.handle());
             let loaded = DeviceConfig::load(&path);
             if loaded.should_persist {
                 let _ = loaded.config.save(&path);
+            }
+            let loaded_preferences = AppPreferences::load(&prefs_path);
+            if loaded_preferences.should_persist {
+                let _ = loaded_preferences.preferences.save(&prefs_path);
             }
 
             let input_controller = Arc::new(Mutex::new(
                 InputController::new().map_err(|err| format!("无法初始化输入控制器: {err}"))?,
             ));
+            let file_transfer = Arc::new(FileTransferManager::new());
 
             app.manage(AppState {
                 receiver: Mutex::new(None),
                 settings: Arc::new(Mutex::new(ReceiverSettings::default())),
+                preferences: Arc::new(Mutex::new(loaded_preferences.preferences)),
+                file_transfer,
                 device: Arc::new(Mutex::new(loaded.config)),
                 device_config_path: path,
+                preferences_path: prefs_path,
                 should_exit: std::sync::atomic::AtomicBool::new(false),
                 input_controller,
             });
@@ -205,6 +296,10 @@ fn main() {
             update_device_name,
             autostart_status,
             set_autostart,
+            preferences_info,
+            update_preferences,
+            pick_download_dir,
+            reset_download_dir,
         ])
         .build(tauri::generate_context!())
         .expect("failed to run PhonePad Receiver")

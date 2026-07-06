@@ -11,16 +11,20 @@ use std::{
 
 use enigo::Direction;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use phonepad_protocol::{
     auth_token, discover_request_auth, ButtonAction, DiscoverRequest, DiscoverResponse, InputPacket,
-    PacketKind, TCP_CONTROL_PORT, UDP_DISCOVERY_PORT, UDP_INPUT_PORT,
+    PacketKind, TCP_CONTROL_PORT, TCP_FILE_PORT, UDP_DISCOVERY_PORT, UDP_INPUT_PORT,
 };
 
 use crate::{
     device_config::DeviceConfig,
+    file_transfer::{self, FileBeginResponse, FileCommitResponse, FileTransferManager},
     input::{normalize_key_repeat, parse_key_action, parse_key_event, reset_modifier_tracker, InputController},
+    platform,
+    preferences::AppPreferences,
     settings::ReceiverSettings,
+    state::AppState,
 };
 
 pub const MAX_TEXT_CHARS: usize = 4096;
@@ -33,6 +37,7 @@ pub struct ReceiverStatus {
     pub running: bool,
     pub udp_port: u16,
     pub tcp_port: u16,
+    pub file_port: u16,
     pub discovery_port: u16,
     pub packets_received: u64,
     pub packets_dropped: u64,
@@ -51,6 +56,7 @@ impl Default for ReceiverStatus {
             running: false,
             udp_port: UDP_INPUT_PORT,
             tcp_port: TCP_CONTROL_PORT,
+            file_port: TCP_FILE_PORT,
             discovery_port: UDP_DISCOVERY_PORT,
             packets_received: 0,
             packets_dropped: 0,
@@ -76,6 +82,13 @@ struct ControlRequest {
     action: Option<String>,
     event: Option<String>,
     repeat: Option<u32>,
+    transfer_id: Option<String>,
+    file_name: Option<String>,
+    file_size: Option<u64>,
+    mime_type: Option<String>,
+    batch_id: Option<String>,
+    file_index: Option<u32>,
+    total_files: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,6 +141,8 @@ pub fn start(
     settings: Arc<Mutex<ReceiverSettings>>,
     device: Arc<Mutex<DeviceConfig>>,
     input: Arc<Mutex<InputController>>,
+    preferences: Arc<Mutex<AppPreferences>>,
+    file_transfer: Arc<FileTransferManager>,
 ) -> Result<ReceiverHandle, String> {
     let udp_socket = UdpSocket::bind(("0.0.0.0", UDP_INPUT_PORT)).map_err(|err| err.to_string())?;
     udp_socket
@@ -171,14 +186,17 @@ pub fn start(
         tcp_listener,
         device,
         input,
+        preferences,
+        file_transfer.clone(),
         shutdown.clone(),
         status.clone(),
     );
+    let file_handle = file_transfer::spawn_file_transfer_loop(file_transfer, shutdown.clone());
 
     Ok(ReceiverHandle {
         shutdown,
         status,
-        workers: Mutex::new(vec![input_handle, discovery_handle, control_handle]),
+        workers: Mutex::new(vec![input_handle, discovery_handle, control_handle, file_handle]),
     })
 }
 
@@ -473,6 +491,19 @@ fn handle_key_request(
     }
 }
 
+fn resolved_download_dir(app: &AppHandle, preferences: &AppPreferences) -> std::path::PathBuf {
+    let fallback = platform::default_download_dir().unwrap_or_else(|| {
+        app.state::<AppState>().config_dir().join("downloads")
+    });
+    preferences.resolved_download_dir(&fallback)
+}
+
+fn write_json_response<T: Serialize>(stream: &mut std::net::TcpStream, payload: &T) {
+    if let Ok(bytes) = serde_json::to_vec(payload) {
+        let _ = stream.write_all(&bytes);
+    }
+}
+
 fn handle_control_connection(
     mut stream: std::net::TcpStream,
     peer: SocketAddr,
@@ -481,6 +512,8 @@ fn handle_control_connection(
     _shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
     input: Arc<Mutex<InputController>>,
+    preferences: Arc<Mutex<AppPreferences>>,
+    file_transfer: Arc<FileTransferManager>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let (request_text, oversize) = read_control_request(&mut stream).unwrap_or_default();
@@ -512,8 +545,16 @@ fn handle_control_connection(
     };
 
     let device_config = device.lock().unwrap().clone();
+    let authed_types = [
+        "text",
+        "key",
+        "status",
+        "fileBegin",
+        "fileCommit",
+        "fileCancel",
+    ];
     if !device_config.validate_secret(&request.device_id, &request.secret) {
-        if request.request_type == "text" || request.request_type == "key" || request.request_type == "status" {
+        if authed_types.contains(&request.request_type.as_str()) {
             write_auth_failure(&mut stream);
         }
         return;
@@ -562,6 +603,92 @@ fn handle_control_connection(
                 status.lock().unwrap().last_client = Some(peer.to_string());
             }
         }
+        "fileBegin" => {
+            let download_dir = {
+                let prefs = preferences.lock().unwrap();
+                resolved_download_dir(&app, &prefs)
+            };
+            let response = match (
+                request.transfer_id.as_deref(),
+                request.file_name.as_deref(),
+                request.file_size,
+                request.batch_id.as_deref(),
+                request.file_index,
+                request.total_files,
+            ) {
+                (
+                    Some(transfer_id),
+                    Some(file_name),
+                    Some(file_size),
+                    Some(batch_id),
+                    Some(file_index),
+                    Some(total_files),
+                ) => match file_transfer.begin_transfer(
+                    &request.secret,
+                    transfer_id,
+                    file_name,
+                    file_size,
+                    batch_id,
+                    file_index,
+                    total_files,
+                    &download_dir,
+                ) {
+                    Ok(response) => response,
+                    Err(error) => FileBeginResponse {
+                        ok: false,
+                        error: Some(error),
+                        upload_port: None,
+                        token: None,
+                    },
+                },
+                _ => FileBeginResponse {
+                    ok: false,
+                    error: Some("缺少文件传输参数".into()),
+                    upload_port: None,
+                    token: None,
+                },
+            };
+            if response.ok {
+                status.lock().unwrap().last_client = Some(peer.to_string());
+            }
+            write_json_response(&mut stream, &response);
+        }
+        "fileCommit" => {
+            let download_dir = {
+                let prefs = preferences.lock().unwrap();
+                resolved_download_dir(&app, &prefs)
+            };
+            let prefs = preferences.lock().unwrap().clone();
+            let response = match request.transfer_id.as_deref() {
+                Some(transfer_id) => file_transfer.commit_transfer(
+                    transfer_id,
+                    &download_dir,
+                    &prefs,
+                    &app,
+                ),
+                None => FileCommitResponse {
+                    ok: false,
+                    error: Some("缺少 transferId".into()),
+                    saved_path: None,
+                },
+            };
+            if response.ok {
+                status.lock().unwrap().last_client = Some(peer.to_string());
+            }
+            write_json_response(&mut stream, &response);
+        }
+        "fileCancel" => {
+            if let Some(transfer_id) = request.transfer_id.as_deref() {
+                file_transfer.cancel_transfer(transfer_id);
+            }
+            write_control_response(
+                &mut stream,
+                &ControlResponse {
+                    ok: true,
+                    error: None,
+                },
+            );
+        }
         _ => {
             write_control_response(
                 &mut stream,
@@ -589,6 +716,8 @@ fn spawn_control_loop(
     listener: TcpListener,
     device: Arc<Mutex<DeviceConfig>>,
     input: Arc<Mutex<InputController>>,
+    preferences: Arc<Mutex<AppPreferences>>,
+    file_transfer: Arc<FileTransferManager>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) -> JoinHandle<()> {
@@ -601,8 +730,20 @@ fn spawn_control_loop(
                     let shutdown = shutdown.clone();
                     let status = status.clone();
                     let input = input.clone();
+                    let preferences = preferences.clone();
+                    let file_transfer = file_transfer.clone();
                     thread::spawn(move || {
-                        handle_control_connection(stream, peer, app, device, shutdown, status, input);
+                        handle_control_connection(
+                            stream,
+                            peer,
+                            app,
+                            device,
+                            shutdown,
+                            status,
+                            input,
+                            preferences,
+                            file_transfer,
+                        );
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -726,6 +867,16 @@ mod tests {
         assert_eq!(normalize_key_repeat(Some(0)), 1);
         assert_eq!(normalize_key_repeat(Some(5)), 5);
         assert_eq!(normalize_key_repeat(Some(999)), MAX_KEY_REPEAT);
+    }
+
+    #[test]
+    fn parses_file_begin_control_request() {
+        let json = r#"{"type":"fileBegin","deviceId":"dev-1","secret":"secret","transferId":"550e8400-e29b-41d4-a716-446655440000","fileName":"photo.jpg","fileSize":1234,"batchId":"batch-1","fileIndex":1,"totalFiles":2}"#;
+        let request: ControlRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(request.request_type, "fileBegin");
+        assert_eq!(request.file_name.as_deref(), Some("photo.jpg"));
+        assert_eq!(request.file_size, Some(1234));
+        assert_eq!(request.total_files, Some(2));
     }
 
     #[test]

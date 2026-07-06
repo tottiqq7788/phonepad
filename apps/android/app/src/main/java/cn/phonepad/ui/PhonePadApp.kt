@@ -73,6 +73,15 @@ import cn.phonepad.ConnectionManager
 import cn.phonepad.ConnectionUiState
 import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
+import cn.phonepad.net.AttachmentResolver
+import cn.phonepad.net.FileTransferProgress
+import cn.phonepad.net.SelectedAttachment
 import cn.phonepad.net.TextInputKeyAction
 import cn.phonepad.touch.TouchpadEngine
 import com.journeyapps.barcodescanner.ScanContract
@@ -115,9 +124,14 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             onCloseDevicePicker = connectionManager::closeDevicePicker,
             onSelectDevice = connectionManager::connectToDevice,
             onSendText = connectionManager::sendTextToActiveDevice,
+            onSendInputContent = connectionManager::sendInputModeContent,
+            onCancelTransfer = connectionManager::cancelTransfer,
+            transferProgress = state.transferProgress,
+            transferSending = state.transferSending,
             onKeyAction = connectionManager::sendKeyActionToActiveDevice,
             onKeyboardKey = connectionManager::sendKeyboardKeyToActiveDevice,
             onClearTextInputError = connectionManager::clearTextInputError,
+            onAttachmentError = connectionManager::setTextInputError,
         )
     } else {
         DeviceHomeScreen(
@@ -324,16 +338,21 @@ private fun TouchpadScreen(
     onCloseDevicePicker: () -> Unit,
     onSelectDevice: (String) -> Unit,
     onSendText: (String, () -> Unit) -> Unit,
+    onSendInputContent: (String, List<SelectedAttachment>, () -> Unit, () -> Unit) -> Unit,
+    onCancelTransfer: () -> Unit,
+    transferProgress: FileTransferProgress?,
+    transferSending: Boolean,
     onKeyAction: (String, Int) -> Unit,
     onKeyboardKey: (String, String?) -> Unit,
     onClearTextInputError: () -> Unit,
+    onAttachmentError: (String) -> Unit,
 ) {
     var showHelp by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
     var showKeyboardInput by remember { mutableStateOf(false) }
 
     fun closeTextInput() {
-        if (state.textSending) return
+        if (state.textSending || transferSending) return
         onClearTextInputError()
         showTextInput = false
     }
@@ -343,7 +362,7 @@ private fun TouchpadScreen(
         showKeyboardInput = false
     }
 
-    BackHandler(enabled = showTextInput && !state.textSending) {
+    BackHandler(enabled = showTextInput && !state.textSending && !transferSending) {
         closeTextInput()
     }
 
@@ -381,10 +400,15 @@ private fun TouchpadScreen(
             if (showTextInput) {
                 TextInputScreen(
                     sending = state.textSending,
+                    transferSending = transferSending,
+                    transferProgress = transferProgress,
                     error = state.textInputError,
                     onBack = ::closeTextInput,
                     onSend = onSendText,
+                    onSendInputContent = onSendInputContent,
+                    onCancelTransfer = onCancelTransfer,
                     onKeyAction = onKeyAction,
+                    onAttachmentError = onAttachmentError,
                 )
             } else if (showKeyboardInput) {
                 KeyboardInputScreen(
@@ -481,33 +505,104 @@ private fun TouchpadScreen(
 @Composable
 private fun TextInputScreen(
     sending: Boolean,
+    transferSending: Boolean,
+    transferProgress: FileTransferProgress?,
     error: String?,
     onBack: () -> Unit,
     onSend: (String, () -> Unit) -> Unit,
+    onSendInputContent: (String, List<SelectedAttachment>, () -> Unit, () -> Unit) -> Unit,
+    onCancelTransfer: () -> Unit,
     onKeyAction: (String, Int) -> Unit,
+    onAttachmentError: (String) -> Unit,
 ) {
     var draft by remember { mutableStateOf("") }
+    var attachments by remember { mutableStateOf<List<SelectedAttachment>>(emptyList()) }
+    var showTransferDialog by remember { mutableStateOf(false) }
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+    val busy = sending || transferSending
+
+    val attachmentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        if (uris.isNullOrEmpty()) return@rememberLauncherForActivityResult
+        val resolved = AttachmentResolver.fromUris(context, uris)
+        if (resolved.isEmpty()) {
+            onAttachmentError("无法读取所选附件，请重试")
+            return@rememberLauncherForActivityResult
+        }
+        attachments = (attachments + resolved).distinctBy { it.uri }
+    }
 
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
         keyboardController?.show()
     }
 
+    LaunchedEffect(transferSending) {
+        if (transferSending) {
+            showTransferDialog = true
+        }
+    }
+
+    LaunchedEffect(transferSending, transferProgress) {
+        if (!transferSending && showTransferDialog && transferProgress == null && error == null) {
+            showTransferDialog = false
+            attachments = emptyList()
+        }
+    }
+
     fun dismiss() {
-        if (sending) return
+        if (busy) return
         keyboardController?.hide()
         onBack()
     }
 
     fun submitDraft() {
-        if (draft.trim().isEmpty() || sending) return
-        onSend(draft) {
-            draft = ""
-            focusRequester.requestFocus()
-            keyboardController?.show()
+        if (busy) return
+        val trimmed = draft.trim()
+        if (trimmed.isEmpty() && attachments.isEmpty()) return
+        if (attachments.isNotEmpty()) {
+            showTransferDialog = true
+            onSendInputContent(
+                draft,
+                attachments,
+                {
+                    draft = ""
+                    focusRequester.requestFocus()
+                    keyboardController?.show()
+                },
+                {
+                    attachments = emptyList()
+                    showTransferDialog = false
+                },
+            )
+        } else {
+            onSend(trimmed) {
+                draft = ""
+                focusRequester.requestFocus()
+                keyboardController?.show()
+            }
         }
+    }
+
+    if (showTransferDialog && (transferSending || transferProgress != null || attachments.isNotEmpty())) {
+        AttachmentTransferDialog(
+            attachments = attachments,
+            progress = transferProgress,
+            sending = transferSending || sending,
+            error = error,
+            onCancel = {
+                onCancelTransfer()
+                showTransferDialog = false
+            },
+            onDismiss = {
+                if (!busy) {
+                    showTransferDialog = false
+                }
+            },
+        )
     }
 
     Column(
@@ -520,9 +615,8 @@ private fun TextInputScreen(
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            IconButton(onClick = ::dismiss, enabled = !sending) {
+            IconButton(onClick = ::dismiss, enabled = !busy) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.ArrowBack,
                     contentDescription = "返回触控板",
@@ -537,45 +631,54 @@ private fun TextInputScreen(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (error != null) {
-                Text(
-                    text = error,
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(horizontal = 4.dp),
-                    color = ErrorColor,
-                    fontSize = 11.sp,
-                    lineHeight = 14.sp,
-                    textAlign = TextAlign.End,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            } else {
-                Spacer(modifier = Modifier.weight(1f))
-            }
+            Spacer(modifier = Modifier.width(8.dp))
             IconButton(
                 onClick = { onKeyAction(TextInputKeyAction.BACKSPACE, 1) },
-                enabled = !sending,
+                enabled = !busy,
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Filled.Backspace,
                     contentDescription = "退格",
-                    tint = if (!sending) Accent else TextMuted,
+                    tint = if (!busy) ErrorColor else TextMuted,
                 )
             }
             IconButton(
                 onClick = { onKeyAction(TextInputKeyAction.DELETE, 1) },
-                enabled = !sending,
+                enabled = !busy,
             ) {
                 Icon(
                     imageVector = Icons.Filled.Delete,
                     contentDescription = "删除",
-                    tint = if (!sending) Accent else TextMuted,
+                    tint = if (!busy) ErrorColor else TextMuted,
                 )
             }
+            Spacer(modifier = Modifier.weight(1f))
+            OutlinedButton(
+                onClick = { attachmentPicker.launch(arrayOf("*/*")) },
+                enabled = !busy,
+                contentPadding = PaddingValues(horizontal = 10.dp),
+                modifier = Modifier.height(40.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.AttachFile,
+                    contentDescription = "选择附件",
+                    tint = if (!busy) Accent else TextMuted,
+                    modifier = Modifier.size(18.dp),
+                )
+                if (attachments.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = attachments.size.toString(),
+                        color = if (!busy) Accent else TextMuted,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(8.dp))
             Button(
                 onClick = ::submitDraft,
-                enabled = draft.trim().isNotEmpty() && !sending,
+                enabled = (draft.trim().isNotEmpty() || attachments.isNotEmpty()) && !busy,
                 modifier = Modifier.height(40.dp),
                 contentPadding = PaddingValues(horizontal = 14.dp),
                 colors = ButtonDefaults.buttonColors(
@@ -591,7 +694,7 @@ private fun TextInputScreen(
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(modifier = Modifier.width(6.dp))
-                Text(text = if (sending) "发送中" else "发送", fontSize = 13.sp)
+                Text(text = if (busy) "发送中" else "发送", fontSize = 13.sp)
             }
         }
 
@@ -601,6 +704,15 @@ private fun TextInputScreen(
             fontSize = 12.sp,
             lineHeight = 18.sp,
         )
+
+        if (error != null && !showTransferDialog) {
+            Text(
+                text = error,
+                color = ErrorColor,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+            )
+        }
 
         BasicTextField(
             value = draft,
@@ -634,11 +746,104 @@ private fun TextInputScreen(
         )
 
         CursorSwipeBar(
-            enabled = !sending,
+            enabled = !busy,
             onMoveLeft = { repeat -> onKeyAction(TextInputKeyAction.CURSOR_LEFT, repeat) },
             onMoveRight = { repeat -> onKeyAction(TextInputKeyAction.CURSOR_RIGHT, repeat) },
         )
     }
+}
+
+@Composable
+private fun AttachmentTransferDialog(
+    attachments: List<SelectedAttachment>,
+    progress: FileTransferProgress?,
+    sending: Boolean,
+    error: String?,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = if (sending) "正在发送附件" else "附件发送",
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "已选择：${attachments.size} 个文件",
+                    color = TextSecondary,
+                    fontSize = 13.sp,
+                )
+                attachments.forEach { attachment ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            text = attachment.displayName,
+                            color = TextPrimary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = formatFileSize(attachment.size),
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                        )
+                    }
+                }
+                if (progress != null) {
+                    Text(
+                        text = "传输中：${progress.currentIndex} / ${progress.totalFiles}  ${progress.currentFileName}",
+                        color = TextSecondary,
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    LinearProgressIndicator(
+                        progress = { progress.percent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Accent,
+                        trackColor = BgElevated,
+                    )
+                    Text(
+                        text = "${progress.percent}%",
+                        color = TextMuted,
+                        fontSize = 11.sp,
+                    )
+                }
+                if (error != null) {
+                    Text(text = error, color = ErrorColor, fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            if (sending) {
+                TextButton(onClick = onCancel) {
+                    Text("取消", color = ErrorColor)
+                }
+            } else {
+                TextButton(onClick = onDismiss) {
+                    Text("关闭", color = Accent)
+                }
+            }
+        },
+    )
+}
+
+private fun formatFileSize(bytes: Long): String {
+    if (bytes < 1024) return "$bytes B"
+    val kb = bytes / 1024.0
+    if (kb < 1024) return String.format(Locale.getDefault(), "%.1f KB", kb)
+    val mb = kb / 1024.0
+    return String.format(Locale.getDefault(), "%.1f MB", mb)
 }
 
 @Composable

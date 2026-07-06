@@ -8,6 +8,7 @@ object Protocol {
     const val PACKET_LEN = 32
     const val UDP_INPUT_PORT = 45454
     const val TCP_CONTROL_PORT = 45455
+    const val TCP_FILE_PORT = 45457
     const val UDP_DISCOVERY_PORT = 45456
     val DISCOVERY_REQUEST = "PHONEPAD_DISCOVER_V1".toByteArray(Charsets.UTF_8)
 

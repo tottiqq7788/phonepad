@@ -1,6 +1,6 @@
 [package]
 name = "phonepad-desktop"
-version = "0.8.1"
+version = "0.9.0"
 description = "Low-latency desktop receiver for PhonePad."
 authors = ["PhonePad"]
 license = "MIT"
@@ -20,15 +20,16 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 arboard = "3"
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
+dirs = "6"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 urlencoding = "2"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 phonepad-protocol = { path = "../../../crates/protocol" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Power"] }
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
