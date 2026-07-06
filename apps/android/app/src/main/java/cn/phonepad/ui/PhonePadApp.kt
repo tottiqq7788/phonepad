@@ -116,7 +116,6 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             onSendText = connectionManager::sendTextToActiveDevice,
             onKeyAction = connectionManager::sendKeyActionToActiveDevice,
             onKeyboardKey = connectionManager::sendKeyboardKeyToActiveDevice,
-            onReleaseKeyboardModifiers = connectionManager::releaseHeldKeyboardModifiers,
             onClearTextInputError = connectionManager::clearTextInputError,
         )
     } else {
@@ -173,7 +172,6 @@ private fun DeviceHomeScreen(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -195,6 +193,23 @@ private fun DeviceHomeScreen(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            val bannerError = state.error ?: scanError
+            if (bannerError != null) {
+                Text(
+                    text = bannerError,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 8.dp),
+                    color = ErrorColor,
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    textAlign = TextAlign.End,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+            }
             IconButton(onClick = ::startScan) {
                 Icon(
                     imageVector = Icons.Filled.CameraAlt,
@@ -204,9 +219,6 @@ private fun DeviceHomeScreen(
                 )
             }
         }
-
-        state.error?.let { ErrorBanner(it) }
-        scanError?.let { ErrorBanner(it) }
 
         if (state.pairedDevices.isEmpty()) {
             Box(
@@ -313,7 +325,6 @@ private fun TouchpadScreen(
     onSendText: (String, () -> Unit) -> Unit,
     onKeyAction: (String, Int) -> Unit,
     onKeyboardKey: (String, String?) -> Unit,
-    onReleaseKeyboardModifiers: () -> Unit,
     onClearTextInputError: () -> Unit,
 ) {
     var showHelp by remember { mutableStateOf(false) }
@@ -327,7 +338,6 @@ private fun TouchpadScreen(
     }
 
     fun closeKeyboardInput() {
-        onReleaseKeyboardModifiers()
         onClearTextInputError()
         showKeyboardInput = false
     }
@@ -380,7 +390,6 @@ private fun TouchpadScreen(
                     error = state.textInputError,
                     onBack = ::closeKeyboardInput,
                     onKeyboardKey = onKeyboardKey,
-                    onReleaseModifiers = onReleaseKeyboardModifiers,
                 )
             } else {
                 Box(
@@ -524,10 +533,25 @@ private fun TextInputScreen(
                 color = TextPrimary,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (error != null) {
+                Text(
+                    text = error,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(horizontal = 4.dp),
+                    color = ErrorColor,
+                    fontSize = 11.sp,
+                    lineHeight = 14.sp,
+                    textAlign = TextAlign.End,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            } else {
+                Spacer(modifier = Modifier.weight(1f))
+            }
             IconButton(
                 onClick = { onKeyAction(TextInputKeyAction.BACKSPACE, 1) },
                 enabled = !sending,
@@ -613,8 +637,6 @@ private fun TextInputScreen(
             onMoveLeft = { repeat -> onKeyAction(TextInputKeyAction.CURSOR_LEFT, repeat) },
             onMoveRight = { repeat -> onKeyAction(TextInputKeyAction.CURSOR_RIGHT, repeat) },
         )
-
-        error?.let { ErrorBanner(it) }
     }
 }
 
@@ -824,8 +846,6 @@ private fun RightRail(
             onClick = onOpenKeyboardInput,
             accent = Accent,
         )
-
-        Spacer(modifier = Modifier.height(8.dp))
 
         RailIconButton(
             icon = Icons.Filled.Edit,

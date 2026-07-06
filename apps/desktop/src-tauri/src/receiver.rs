@@ -462,6 +462,7 @@ fn handle_control_connection(
     device: Arc<Mutex<DeviceConfig>>,
     _shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
+    input: Arc<Mutex<InputController>>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let (request_text, oversize) = read_control_request(&mut stream).unwrap_or_default();
@@ -514,12 +515,11 @@ fn handle_control_connection(
             let _ = app.emit("receiver://status", snapshot);
         }
         "text" => {
-            let mut input = InputController::new().ok();
-            let response = match input.as_mut() {
-                Some(controller) => handle_text_request(controller, request.content),
-                None => ControlResponse {
+            let response = match input.lock() {
+                Ok(mut controller) => handle_text_request(&mut controller, request.content),
+                Err(_) => ControlResponse {
                     ok: false,
-                    error: Some("无法初始化输入控制器".into()),
+                    error: Some("无法获取输入控制器".into()),
                 },
             };
             let succeeded = response.ok;
@@ -529,14 +529,13 @@ fn handle_control_connection(
             }
         }
         "key" => {
-            let mut input = InputController::new().ok();
-            let response = match input.as_mut() {
-                Some(controller) => {
-                    handle_key_request(controller, request.action, request.event, request.repeat)
+            let response = match input.lock() {
+                Ok(mut controller) => {
+                    handle_key_request(&mut controller, request.action, request.event, request.repeat)
                 }
-                None => ControlResponse {
+                Err(_) => ControlResponse {
                     ok: false,
-                    error: Some("无法初始化输入控制器".into()),
+                    error: Some("无法获取输入控制器".into()),
                 },
             };
             let succeeded = response.ok;
@@ -566,6 +565,14 @@ fn spawn_control_loop(
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) {
+    let input = match InputController::new() {
+        Ok(controller) => Arc::new(Mutex::new(controller)),
+        Err(err) => {
+            let _ = app.emit("receiver://error", format!("无法初始化键盘控制器: {err}"));
+            return;
+        }
+    };
+
     thread::spawn(move || {
         while !shutdown.load(Ordering::Relaxed) {
             match listener.accept() {
@@ -574,8 +581,9 @@ fn spawn_control_loop(
                     let device = device.clone();
                     let shutdown = shutdown.clone();
                     let status = status.clone();
+                    let input = input.clone();
                     thread::spawn(move || {
-                        handle_control_connection(stream, peer, app, device, shutdown, status);
+                        handle_control_connection(stream, peer, app, device, shutdown, status, input);
                     });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {

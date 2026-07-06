@@ -1,7 +1,50 @@
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use phonepad_protocol::{ButtonAction, MouseButton};
+use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 
 use crate::settings::ReceiverSettings;
+
+static MODIFIER_TRACKER: Mutex<ModifierTracker> = Mutex::new(ModifierTracker {
+    shift: 0,
+    ctrl: 0,
+    alt: 0,
+    meta: 0,
+});
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ModifierTracker {
+    shift: u32,
+    ctrl: u32,
+    alt: u32,
+    meta: u32,
+}
+
+impl ModifierTracker {
+    fn apply(&mut self, key: Key, direction: Direction) {
+        let delta = match direction {
+            Direction::Press => 1,
+            Direction::Release => -1,
+            Direction::Click => return,
+        };
+        match key {
+            Key::Shift => self.shift = (self.shift as i32 + delta).max(0) as u32,
+            Key::Control => self.ctrl = (self.ctrl as i32 + delta).max(0) as u32,
+            Key::Alt => self.alt = (self.alt as i32 + delta).max(0) as u32,
+            Key::Meta => self.meta = (self.meta as i32 + delta).max(0) as u32,
+            _ => {}
+        }
+    }
+
+    fn has_shift(&self) -> bool {
+        self.shift > 0
+    }
+
+    fn has_chord_modifier(&self) -> bool {
+        self.ctrl > 0 || self.alt > 0 || self.meta > 0
+    }
+}
 
 pub struct InputController {
     enigo: Enigo,
@@ -75,17 +118,121 @@ impl InputController {
     }
 
     pub fn press_key(&mut self, key: Key, repeat: u32) -> Result<(), String> {
+        let resolved = resolve_click_key(key);
         for _ in 0..repeat {
             self.enigo
-                .key(key, Direction::Click)
+                .key(resolved, Direction::Press)
+                .map_err(|err| err.to_string())?;
+            thread::sleep(Duration::from_millis(8));
+            self.enigo
+                .key(resolved, Direction::Release)
                 .map_err(|err| err.to_string())?;
         }
         Ok(())
     }
 
     pub fn key_event(&mut self, key: Key, direction: Direction) -> Result<(), String> {
+        if let Ok(mut tracker) = MODIFIER_TRACKER.lock() {
+            tracker.apply(key, direction);
+        }
         self.enigo.key(key, direction).map_err(|err| err.to_string())
     }
+}
+
+fn resolve_click_key(key: Key) -> Key {
+    let Key::Unicode(ch) = key else {
+        return key;
+    };
+
+    let tracker = MODIFIER_TRACKER.lock().ok();
+    let Some(tracker) = tracker.as_deref() else {
+        return key;
+    };
+
+    let shifted = if tracker.has_shift() {
+        apply_shift_char(ch)
+    } else {
+        ch
+    };
+
+    if tracker.has_chord_modifier() || (tracker.has_shift() && shifted.is_ascii_alphabetic()) {
+        if let Some(layout) = ascii_letter_to_layout_key(shifted) {
+            return layout;
+        }
+    }
+
+    if shifted != ch {
+        Key::Unicode(shifted)
+    } else {
+        key
+    }
+}
+
+fn apply_shift_char(ch: char) -> char {
+    match ch {
+        'a'..='z' => ch.to_ascii_uppercase(),
+        '1' => '!',
+        '2' => '@',
+        '3' => '#',
+        '4' => '$',
+        '5' => '%',
+        '6' => '^',
+        '7' => '&',
+        '8' => '*',
+        '9' => '(',
+        '0' => ')',
+        '-' => '_',
+        '=' => '+',
+        '[' => '{',
+        ']' => '}',
+        '\\' => '|',
+        ';' => ':',
+        '\'' => '"',
+        ',' => '<',
+        '.' => '>',
+        '/' => '?',
+        '`' => '~',
+        _ => ch,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn ascii_letter_to_layout_key(ch: char) -> Option<Key> {
+    match ch.to_ascii_uppercase() {
+        'A' => Some(Key::A),
+        'B' => Some(Key::B),
+        'C' => Some(Key::C),
+        'D' => Some(Key::D),
+        'E' => Some(Key::E),
+        'F' => Some(Key::F),
+        'G' => Some(Key::G),
+        'H' => Some(Key::H),
+        'I' => Some(Key::I),
+        'J' => Some(Key::J),
+        'K' => Some(Key::K),
+        'L' => Some(Key::L),
+        'M' => Some(Key::M),
+        'N' => Some(Key::N),
+        'O' => Some(Key::O),
+        'P' => Some(Key::P),
+        'Q' => Some(Key::Q),
+        'R' => Some(Key::R),
+        'S' => Some(Key::S),
+        'T' => Some(Key::T),
+        'U' => Some(Key::U),
+        'V' => Some(Key::V),
+        'W' => Some(Key::W),
+        'X' => Some(Key::X),
+        'Y' => Some(Key::Y),
+        'Z' => Some(Key::Z),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ascii_letter_to_layout_key(ch: char) -> Option<Key> {
+    let _ = ch;
+    None
 }
 
 pub const MAX_KEY_REPEAT: u32 = 20;
@@ -193,5 +340,39 @@ mod tests {
         assert!(matches!(parse_key_event(Some("down")), Ok(Direction::Press)));
         assert!(matches!(parse_key_event(Some("up")), Ok(Direction::Release)));
         assert!(parse_key_event(Some("invalid")).is_err());
+    }
+
+    #[test]
+    fn resolves_shifted_letter_to_layout_key() {
+        let mut tracker = MODIFIER_TRACKER.lock().unwrap();
+        *tracker = ModifierTracker::default();
+        tracker.apply(Key::Shift, Direction::Press);
+        drop(tracker);
+
+        assert!(matches!(resolve_click_key(Key::Unicode('a')), Key::A));
+
+        let mut tracker = MODIFIER_TRACKER.lock().unwrap();
+        tracker.apply(Key::Shift, Direction::Release);
+        drop(tracker);
+    }
+
+    #[test]
+    fn resolves_ctrl_letter_to_layout_key() {
+        let mut tracker = MODIFIER_TRACKER.lock().unwrap();
+        *tracker = ModifierTracker::default();
+        tracker.apply(Key::Control, Direction::Press);
+        drop(tracker);
+
+        #[cfg(target_os = "windows")]
+        assert!(matches!(resolve_click_key(Key::Unicode('c')), Key::C));
+
+        let mut tracker = MODIFIER_TRACKER.lock().unwrap();
+        tracker.apply(Key::Control, Direction::Release);
+    }
+
+    #[test]
+    fn apply_shift_char_maps_symbols() {
+        assert_eq!(apply_shift_char('1'), '!');
+        assert_eq!(apply_shift_char('a'), 'A');
     }
 }

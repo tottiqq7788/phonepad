@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "phonepad-desktop"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "default-net",
  "enigo",
@@ -2471,7 +2471,7 @@ dependencies = [
 
 [[package]]
 name = "phonepad-protocol"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",
