@@ -2,12 +2,8 @@ package cn.phonepad.net
 
 import cn.phonepad.protocol.Protocol
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.job
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -26,11 +22,6 @@ data class ReceiverStatus(
 data class ControlResponse(
     val ok: Boolean,
     val error: String? = null,
-)
-
-data class FocusState(
-    val editable: Boolean,
-    val appName: String?,
 )
 
 object TextInputKeyAction {
@@ -99,56 +90,6 @@ class ControlClient {
             } ?: ControlResponse(ok = false, error = "未收到桌面端响应")
         }.getOrElse { err ->
             ControlResponse(ok = false, error = err.message ?: "按键发送失败")
-        }
-    }
-
-    suspend fun subscribeFocusState(
-        host: String,
-        deviceId: String,
-        secret: String,
-        port: Int = Protocol.TCP_CONTROL_PORT,
-        onState: suspend (FocusState) -> Unit,
-    ) = withContext(Dispatchers.IO) {
-        val socket = Socket()
-        coroutineContext.job.invokeOnCompletion {
-            runCatching { socket.close() }
-        }
-        try {
-            socket.connect(InetSocketAddress(host, port), 3000)
-            socket.soTimeout = 2000
-            socket.getOutputStream().write(
-                buildRequest("focusSubscribe", deviceId, secret).toByteArray(),
-            )
-            val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
-            val ackLine = reader.readLine() ?: throw IllegalStateException("未收到 focusSubscribe 响应")
-            val ack = JSONObject(ackLine)
-            if (!ack.optBoolean("ok")) {
-                throw IllegalStateException(ack.optString("error", "focusSubscribe 被拒绝"))
-            }
-
-            while (coroutineContext.isActive) {
-                val line = try {
-                    reader.readLine()
-                } catch (_: java.net.SocketTimeoutException) {
-                    continue
-                } catch (err: java.net.SocketException) {
-                    if (!coroutineContext.isActive) {
-                        return@withContext
-                    }
-                    throw err
-                } ?: break
-                if (line.isBlank()) continue
-                val json = runCatching { JSONObject(line) }.getOrNull() ?: continue
-                if (json.optString("type") != "focusState") continue
-                onState(
-                    FocusState(
-                        editable = json.optBoolean("editable"),
-                        appName = json.optString("appName").takeIf { it.isNotBlank() },
-                    ),
-                )
-            }
-        } finally {
-            runCatching { socket.close() }
         }
     }
 

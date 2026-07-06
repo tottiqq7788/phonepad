@@ -18,7 +18,6 @@ use phonepad_protocol::{
 
 use crate::{
     device_config::DeviceConfig,
-    focus::{self, FocusSnapshot},
     input::{normalize_key_repeat, parse_key_action, InputController},
     settings::ReceiverSettings,
 };
@@ -436,57 +435,12 @@ fn handle_key_request(
     }
 }
 
-fn handle_focus_subscribe(
-    stream: &mut std::net::TcpStream,
-    shutdown: Arc<AtomicBool>,
-) {
-    write_control_response(
-        stream,
-        &ControlResponse {
-            ok: true,
-            error: None,
-        },
-    );
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(150)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-
-    let mut detector = focus::create_detector();
-    let mut last = FocusSnapshot::default();
-    let mut probe = [0u8; 1];
-
-    while !shutdown.load(Ordering::Relaxed) {
-        match stream.read(&mut probe) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(err)
-                if err.kind() == std::io::ErrorKind::WouldBlock
-                    || err.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(_) => break,
-        }
-
-        let snap = detector.snapshot();
-        if snap != last {
-            let payload = serde_json::json!({
-                "type": "focusState",
-                "editable": snap.editable,
-                "appName": snap.app_name,
-            });
-            let line = format!("{payload}\n");
-            if stream.write_all(line.as_bytes()).is_err() {
-                break;
-            }
-            let _ = stream.flush();
-            last = snap;
-        }
-    }
-}
-
 fn handle_control_connection(
     mut stream: std::net::TcpStream,
     peer: SocketAddr,
     app: AppHandle,
     device: Arc<Mutex<DeviceConfig>>,
-    shutdown: Arc<AtomicBool>,
+    _shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
@@ -520,10 +474,7 @@ fn handle_control_connection(
 
     let device_config = device.lock().unwrap().clone();
     if !device_config.validate_secret(&request.device_id, &request.secret) {
-        if request.request_type == "text"
-            || request.request_type == "key"
-            || request.request_type == "focusSubscribe"
-        {
+        if request.request_type == "text" || request.request_type == "key" {
             write_auth_failure(&mut stream);
         }
         return;
@@ -574,7 +525,6 @@ fn handle_control_connection(
                 status.lock().unwrap().last_client = Some(peer.to_string());
             }
         }
-        "focusSubscribe" => handle_focus_subscribe(&mut stream, shutdown),
         _ => {}
     }
 }
@@ -716,25 +666,6 @@ mod tests {
         assert_eq!(normalize_key_repeat(Some(0)), 1);
         assert_eq!(normalize_key_repeat(Some(5)), 5);
         assert_eq!(normalize_key_repeat(Some(999)), MAX_KEY_REPEAT);
-    }
-
-    #[test]
-    fn parses_focus_subscribe_request() {
-        let json = r#"{"type":"focusSubscribe","deviceId":"dev-1","secret":"secret"}"#;
-        let request: ControlRequest = serde_json::from_str(json).unwrap();
-        assert_eq!(request.request_type, "focusSubscribe");
-    }
-
-    #[test]
-    fn focus_state_json_format() {
-        let payload = serde_json::json!({
-            "type": "focusState",
-            "editable": true,
-            "appName": "Notepad",
-        });
-        let text = payload.to_string();
-        assert!(text.contains("focusState"));
-        assert!(text.contains("editable"));
     }
 
     #[test]

@@ -44,7 +44,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -116,7 +115,6 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             onSendText = connectionManager::sendTextToActiveDevice,
             onKeyAction = connectionManager::sendKeyActionToActiveDevice,
             onClearTextInputError = connectionManager::clearTextInputError,
-            onSuppressAutoInput = connectionManager::suppressAutoInput,
         )
     } else {
         DeviceHomeScreen(
@@ -312,26 +310,12 @@ private fun TouchpadScreen(
     onSendText: (String, () -> Unit) -> Unit,
     onKeyAction: (String, Int) -> Unit,
     onClearTextInputError: () -> Unit,
-    onSuppressAutoInput: () -> Unit,
 ) {
     var showHelp by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
-    var dismissedAtSignal by remember { mutableLongStateOf(0L) }
-
-    LaunchedEffect(state.autoTextInputSignal) {
-        val signal = state.autoTextInputSignal
-        if (signal > 0 && !showTextInput && signal > dismissedAtSignal) {
-            showHelp = false
-            onCloseDevicePicker()
-            onClearTextInputError()
-            showTextInput = true
-        }
-    }
 
     fun closeTextInput() {
         if (state.textSending) return
-        dismissedAtSignal = state.autoTextInputSignal
-        onSuppressAutoInput()
         onClearTextInputError()
         showTextInput = false
     }

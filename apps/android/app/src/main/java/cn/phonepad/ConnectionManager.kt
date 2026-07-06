@@ -16,12 +16,10 @@ import cn.phonepad.storage.PairedDeviceStore
 import cn.phonepad.touch.ReceiverTarget
 import cn.phonepad.touch.TouchpadEngine
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 data class ConnectionUiState(
     val pairedDevices: List<PairedDevice> = emptyList(),
@@ -37,7 +35,6 @@ data class ConnectionUiState(
     val showDevicePicker: Boolean = false,
     val textSending: Boolean = false,
     val textInputError: String? = null,
-    val autoTextInputSignal: Long = 0,
 )
 
 class ConnectionManager(
@@ -54,16 +51,13 @@ class ConnectionManager(
         private set
 
     private var monitorJob: Job? = null
-    private var focusSubscribeJob: Job? = null
     private var onlineJob: Job? = null
     private var onlineRefreshJob: Job? = null
     private var textSendJob: Job? = null
-    private var autoInputSuppressedUntil = 0L
 
     companion object {
         private const val MAX_TEXT_CHARS = 4096
         private const val MAX_TEXT_BYTES = 6000
-        private const val AUTO_INPUT_SUPPRESS_MS = 3000L
     }
 
     init {
@@ -151,7 +145,6 @@ class ConnectionManager(
 
     private suspend fun connectWithPayload(payload: PairingPayload, fromScan: Boolean) {
         monitorJob?.cancel()
-        focusSubscribeJob?.cancel()
         uiState = uiState.copy(error = null, showDevicePicker = false, connecting = true)
 
         var resolved = resolvePayload(payload)
@@ -245,7 +238,6 @@ class ConnectionManager(
         )
         haptics.connected()
         startMonitor(device)
-        startFocusSubscribe(device)
         if (fromScan) {
             refreshOnlineStates()
         }
@@ -270,7 +262,6 @@ class ConnectionManager(
 
     fun disconnect() {
         monitorJob?.cancel()
-        focusSubscribeJob?.cancel()
         textSendJob?.cancel()
         touchpadEngine.setTarget(null)
         inputSender.setSecret("")
@@ -285,7 +276,6 @@ class ConnectionManager(
             showDevicePicker = false,
             textSending = false,
             textInputError = null,
-            autoTextInputSignal = 0,
         )
         haptics.disconnected()
         refreshOnlineStates()
@@ -302,10 +292,6 @@ class ConnectionManager(
 
     fun clearTextInputError() {
         uiState = uiState.copy(textInputError = null)
-    }
-
-    fun suppressAutoInput(durationMs: Long = AUTO_INPUT_SUPPRESS_MS) {
-        autoInputSuppressedUntil = System.currentTimeMillis() + durationMs
     }
 
     fun sendTextToActiveDevice(text: String, onSuccess: () -> Unit = {}) {
@@ -395,49 +381,6 @@ class ConnectionManager(
         }
     }
 
-    private fun startFocusSubscribe(device: PairedDevice) {
-        focusSubscribeJob?.cancel()
-        focusSubscribeJob = scope.launch {
-            var backoffMs = 500L
-            while (isActive && uiState.connected && uiState.activeDeviceId == device.id) {
-                try {
-                    controlClient.subscribeFocusState(
-                        host = device.host,
-                        deviceId = device.id,
-                        secret = device.secret,
-                        port = device.tcpPort,
-                    ) { state ->
-                        if (
-                            state.editable &&
-                            System.currentTimeMillis() >= autoInputSuppressedUntil &&
-                            uiState.connected &&
-                            uiState.activeDeviceId == device.id
-                        ) {
-                            withContext(Dispatchers.Main) {
-                                if (
-                                    System.currentTimeMillis() >= autoInputSuppressedUntil &&
-                                    uiState.connected &&
-                                    uiState.activeDeviceId == device.id
-                                ) {
-                                    uiState = uiState.copy(
-                                        autoTextInputSignal = uiState.autoTextInputSignal + 1,
-                                    )
-                                }
-                            }
-                        }
-                    }
-                } catch (_: Exception) {
-                    // reconnect below
-                }
-                if (!isActive || !uiState.connected || uiState.activeDeviceId != device.id) {
-                    break
-                }
-                delay(backoffMs)
-                backoffMs = (backoffMs * 2).coerceAtMost(2000L)
-            }
-        }
-    }
-
     private fun startMonitor(device: PairedDevice) {
         monitorJob?.cancel()
         monitorJob = scope.launch {
@@ -465,7 +408,6 @@ class ConnectionManager(
 
     fun release() {
         monitorJob?.cancel()
-        focusSubscribeJob?.cancel()
         onlineJob?.cancel()
         textSendJob?.cancel()
         inputSender.close()
