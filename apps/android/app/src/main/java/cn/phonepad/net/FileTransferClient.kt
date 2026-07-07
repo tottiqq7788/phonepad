@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import cn.phonepad.logging.PhonePadLogger
 import cn.phonepad.protocol.Protocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -112,6 +113,11 @@ class FileTransferClient(
         val batchId = UUID.randomUUID().toString()
         val totalBytes = attachments.sumOf { it.size }
         var sentBytes = 0L
+        PhonePadLogger.i(
+            "file_transfer",
+            "file_batch_start",
+            "batch_id=${PhonePadLogger.shortId(batchId)} files=${attachments.size} total_bytes=$totalBytes",
+        )
 
         attachments.forEachIndexed { index, attachment ->
             if (isCancelled()) {
@@ -133,8 +139,18 @@ class FileTransferClient(
                 totalFiles = attachments.size,
             )
             if (!begin.ok) {
+                PhonePadLogger.w(
+                    "file_transfer",
+                    "file_begin_failed",
+                    "transfer_id=${PhonePadLogger.shortId(transferId)} file=${attachment.displayName} size=${attachment.size} reason=${begin.error ?: "unknown"}",
+                )
                 return@withContext ControlResponse(ok = false, error = begin.error ?: "无法开始文件传输")
             }
+            PhonePadLogger.i(
+                "file_transfer",
+                "file_begin",
+                "transfer_id=${PhonePadLogger.shortId(transferId)} file=${attachment.displayName} size=${attachment.size} mime=${attachment.mimeType} index=${index + 1}/${attachments.size}",
+            )
 
             val uploadResult = uploadBinary(
                 context = context,
@@ -160,6 +176,11 @@ class FileTransferClient(
                 isCancelled = isCancelled,
             )
             if (!uploadResult.ok) {
+                PhonePadLogger.w(
+                    "file_transfer",
+                    "file_upload_failed",
+                    "transfer_id=${PhonePadLogger.shortId(transferId)} file=${attachment.displayName} reason=${uploadResult.error ?: "unknown"}",
+                )
                 fileCancel(host, deviceId, secret, tcpPort, transferId)
                 return@withContext uploadResult
             }
@@ -171,9 +192,19 @@ class FileTransferClient(
 
             val commit = fileCommit(host, deviceId, secret, tcpPort, transferId)
             if (!commit.ok) {
+                PhonePadLogger.w(
+                    "file_transfer",
+                    "file_commit_failed",
+                    "transfer_id=${PhonePadLogger.shortId(transferId)} file=${attachment.displayName} reason=${commit.error ?: "unknown"}",
+                )
                 fileCancel(host, deviceId, secret, tcpPort, transferId)
                 return@withContext ControlResponse(ok = false, error = commit.error ?: "文件保存失败")
             }
+            PhonePadLogger.i(
+                "file_transfer",
+                "file_commit",
+                "transfer_id=${PhonePadLogger.shortId(transferId)} file=${attachment.displayName} saved_path=${commit.savedPath ?: "-"}",
+            )
 
             sentBytes += attachment.size
             onProgress(
@@ -190,6 +221,11 @@ class FileTransferClient(
             )
         }
 
+        PhonePadLogger.i(
+            "file_transfer",
+            "file_batch_complete",
+            "batch_id=${PhonePadLogger.shortId(batchId)} files=${attachments.size}",
+        )
         ControlResponse(ok = true)
     }
 
@@ -231,23 +267,42 @@ class FileTransferClient(
                     error = "未收到桌面端响应",
                 )
                 val json = JSONObject(jsonText)
-                val token = json.optString("token")
-                if (token.isBlank()) {
+                if (!json.optBoolean("ok")) {
                     return FileBeginResult(
                         ok = false,
                         uploadPort = Protocol.TCP_FILE_PORT,
                         token = "",
-                        error = "桌面端未返回有效 token",
+                        error = json.optString("error").takeIf { it.isNotBlank() } ?: "无法开始文件传输",
+                    )
+                }
+                val token = parseFileTransferToken(json)
+                if (token == null || !validateFileTransferToken(token)) {
+                    PhonePadLogger.w(
+                        "file_transfer",
+                        "token_invalid",
+                        "transfer_id=${PhonePadLogger.shortId(transferId)} file=$fileName",
+                    )
+                    return FileBeginResult(
+                        ok = false,
+                        uploadPort = Protocol.TCP_FILE_PORT,
+                        token = "",
+                        error = "桌面端返回无效 token，请更新 PhonePad 到最新版本后重试",
                     )
                 }
                 FileBeginResult(
-                    ok = json.optBoolean("ok"),
+                    ok = true,
                     uploadPort = json.optInt("uploadPort", Protocol.TCP_FILE_PORT),
                     token = token,
-                    error = json.optString("error").takeIf { it.isNotBlank() },
+                    error = null,
                 )
             }
         }.getOrElse { err ->
+            PhonePadLogger.w(
+                "file_transfer",
+                "file_begin_failed",
+                "transfer_id=${PhonePadLogger.shortId(transferId)} file=$fileName reason=${err.message ?: "unknown"}",
+                err,
+            )
             FileBeginResult(
                 ok = false,
                 uploadPort = Protocol.TCP_FILE_PORT,
@@ -293,6 +348,11 @@ class FileTransferClient(
                         onChunkSent(fileSent)
                     }
                     if (fileSent != expectedSize) {
+                        PhonePadLogger.w(
+                            "file_transfer",
+                            "file_upload_failed",
+                            "transfer_id=${PhonePadLogger.shortId(transferId)} file=${attachment.displayName} reason=size_mismatch sent=$fileSent expected=$expectedSize",
+                        )
                         return ControlResponse(ok = false, error = "文件大小与预期不符")
                     }
                 } ?: return ControlResponse(ok = false, error = "无法读取附件")
@@ -307,6 +367,12 @@ class FileTransferClient(
                 )
             }
         }.getOrElse { err ->
+            PhonePadLogger.w(
+                "file_transfer",
+                "file_upload_failed",
+                "transfer_id=${PhonePadLogger.shortId(transferId)} file=${attachment.displayName} reason=${err.message ?: "unknown"}",
+                err,
+            )
             ControlResponse(ok = false, error = err.message ?: "文件上传失败")
         }
     }
@@ -365,6 +431,11 @@ class FileTransferClient(
                 socket.soTimeout = 3000
                 socket.getOutputStream().write(request.toByteArray())
             }
+            PhonePadLogger.i(
+                "file_transfer",
+                "file_cancel",
+                "transfer_id=${PhonePadLogger.shortId(transferId)}",
+            )
         }
     }
 
@@ -381,6 +452,25 @@ class FileTransferClient(
         return header
     }
 }
+
+internal fun parseFileTransferToken(json: JSONObject): String? {
+    if (!json.has("token") || json.isNull("token")) {
+        return null
+    }
+    return when (val raw = json.get("token")) {
+        is String -> raw.trim().takeIf { it.isNotEmpty() }
+        is Number -> runCatching {
+            java.math.BigDecimal(raw.toString()).toBigInteger().toString()
+        }.getOrNull()
+        else -> null
+    }
+}
+
+internal fun validateFileTransferToken(token: String): Boolean =
+    runCatching {
+        val value = BigInteger(token.trim())
+        value.signum() >= 0 && value.bitLength() <= 64
+    }.getOrDefault(false)
 
 internal fun tokenToLittleEndianBytes(token: String): ByteArray {
     val value = BigInteger(token)

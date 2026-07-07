@@ -4,6 +4,7 @@
 mod device_config;
 mod file_transfer;
 mod input;
+mod logging;
 mod notify;
 mod pairing;
 mod platform;
@@ -228,6 +229,21 @@ fn main() {
         .setup(|app| {
             platform::keep_process_responsive();
 
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .unwrap_or_else(|_| PathBuf::from("."));
+            logging::init(config_dir.join("logs"));
+            logging::info(
+                "app",
+                "app_start",
+                &format!(
+                    "version={} config_dir={}",
+                    env!("CARGO_PKG_VERSION"),
+                    config_dir.display()
+                ),
+            );
+
             let path = device_config_path(app.handle());
             let prefs_path = preferences_path(app.handle());
             let loaded = DeviceConfig::load(&path);
@@ -258,8 +274,10 @@ fn main() {
 
             let app_handle = app.handle().clone();
             if let Err(err) = auto_start_receiver(&app_handle) {
-                eprintln!("failed to auto-start receiver: {err}");
+                logging::error("app", "auto_start_receiver_failed", &format!("reason={err}"));
                 notify::show_error(&app_handle, &format!("接收服务启动失败: {err}"));
+            } else {
+                logging::info("app", "auto_start_receiver", "result=ok");
             }
 
             setup_tray(app)?;

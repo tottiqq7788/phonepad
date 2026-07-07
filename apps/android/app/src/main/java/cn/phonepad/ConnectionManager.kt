@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import cn.phonepad.haptics.HapticsManager
+import cn.phonepad.logging.PhonePadLogger
 import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
 import cn.phonepad.net.ControlClient
@@ -17,6 +18,7 @@ import cn.phonepad.net.SelectedAttachment
 import cn.phonepad.net.InputSender
 import cn.phonepad.net.PairingPayload
 import cn.phonepad.net.PairingUrlParser
+import cn.phonepad.protocol.Protocol
 import cn.phonepad.storage.PairedDeviceStore
 import cn.phonepad.touch.ReceiverTarget
 import cn.phonepad.touch.TouchpadEngine
@@ -67,6 +69,9 @@ class ConnectionManager(
     private var onlineRefreshJob: Job? = null
     private var textSendJob: Job? = null
     private var transferJob: Job? = null
+    private var connectJob: Job? = null
+    @Volatile
+    private var connectGeneration = 0L
     @Volatile
     private var transferCancelled = false
     private val keyboardSendMutex = Mutex()
@@ -135,22 +140,35 @@ class ConnectionManager(
     }
 
     fun pairFromScan(raw: String) {
-        scope.launch {
+        startConnect { generation ->
             val payload = PairingUrlParser.parse(raw)
             if (payload == null) {
-                uiState = uiState.copy(error = "无法识别二维码，请扫描 PhonePad 桌面端配对二维码。")
-                return@launch
+                PhonePadLogger.w("connection", "pair_scan_failed", "reason=invalid_qr")
+                if (!isStaleConnect(generation)) {
+                    uiState = uiState.copy(error = "无法识别二维码，请扫描 PhonePad 桌面端配对二维码。")
+                }
+                return@startConnect
             }
-            connectWithPayload(payload, fromScan = true)
+            PhonePadLogger.i(
+                "connection",
+                "pair_scan",
+                "device_id=${PhonePadLogger.shortId(payload.deviceId)} host=${payload.host ?: "-"} from_scan=true",
+            )
+            connectWithPayload(payload, fromScan = true, generation = generation)
         }
     }
 
     fun connectToDevice(deviceId: String) {
-        scope.launch {
+        if (uiState.connecting) {
+            return
+        }
+        startConnect { generation ->
             val device = store.load().firstOrNull { it.id == deviceId }
             if (device == null) {
-                uiState = uiState.copy(error = "设备不存在，请重新扫码。")
-                return@launch
+                if (!isStaleConnect(generation)) {
+                    uiState = uiState.copy(error = "设备不存在，请重新扫码。")
+                }
+                return@startConnect
             }
             connectWithPayload(
                 PairingPayload(
@@ -162,25 +180,58 @@ class ConnectionManager(
                     secret = device.secret,
                 ),
                 fromScan = false,
+                generation = generation,
             )
         }
     }
 
-    private suspend fun connectWithPayload(payload: PairingPayload, fromScan: Boolean) {
+    private fun startConnect(block: suspend (Long) -> Unit) {
+        connectJob?.cancel()
+        val generation = ++connectGeneration
+        connectJob = scope.launch {
+            try {
+                block(generation)
+            } finally {
+                if (connectJob == coroutineContext[Job]) {
+                    connectJob = null
+                }
+            }
+        }
+    }
+
+    private fun isStaleConnect(generation: Long): Boolean =
+        generation != connectGeneration
+
+    private suspend fun connectWithPayload(
+        payload: PairingPayload,
+        fromScan: Boolean,
+        generation: Long,
+    ) {
         stopActiveTransfer()
         monitorJob?.cancel()
         releaseHeldKeyboardModifiers()
         touchpadEngine.setTarget(null)
         inputSender.setSecret("")
         uiState = uiState.copy(error = null, showDevicePicker = false, connecting = true)
+        PhonePadLogger.i(
+            "connection",
+            "connect_attempt",
+            "device_id=${PhonePadLogger.shortId(payload.deviceId)} from_scan=$fromScan needs_discovery=${payload.needsDiscovery()}",
+        )
 
         var resolved = resolvePayload(payload)
         var host = resolved.host?.takeIf { it.isNotBlank() }
         if (host == null) {
+            PhonePadLogger.w(
+                "connection",
+                "discover_timeout",
+                "device_id=${PhonePadLogger.shortId(payload.deviceId)} reason=no_host",
+            )
+            if (isStaleConnect(generation) || !coroutineContext.isActive) return
             uiState = uiState.copy(
                 connected = false,
                 connecting = false,
-                error = "已扫码，但未在当前局域网发现桌面端，请确认接收服务已启动并检查防火墙。",
+                error = "未在当前局域网发现桌面端，请确认手机与电脑在同一 Wi-Fi，桌面端接收服务已启动，并重新扫描桌面端二维码。",
             )
             haptics.disconnected()
             return
@@ -193,7 +244,7 @@ class ConnectionManager(
             port = resolved.tcpPort,
         )
         if (status == null || !status.running) {
-            val rediscovered = DiscoveryClient.discover(
+            val rediscovered = discoverDesktop(
                 deviceId = payload.deviceId,
                 secret = payload.secret,
                 discoveryPort = payload.discoveryPort,
@@ -214,6 +265,12 @@ class ConnectionManager(
             }
         }
         if (status == null || !status.running) {
+            PhonePadLogger.w(
+                "connection",
+                "tcp_connect_failed",
+                "device_id=${PhonePadLogger.shortId(payload.deviceId)} host=$host reason=status_unavailable",
+            )
+            if (isStaleConnect(generation) || !coroutineContext.isActive) return
             uiState = uiState.copy(
                 connected = false,
                 connecting = false,
@@ -223,6 +280,12 @@ class ConnectionManager(
             return
         }
         if (status.deviceId.isNotBlank() && status.deviceId != payload.deviceId) {
+            PhonePadLogger.w(
+                "connection",
+                "device_mismatch",
+                "expected=${PhonePadLogger.shortId(payload.deviceId)} actual=${PhonePadLogger.shortId(status.deviceId)}",
+            )
+            if (isStaleConnect(generation) || !coroutineContext.isActive) return
             uiState = uiState.copy(
                 connected = false,
                 connecting = false,
@@ -243,6 +306,7 @@ class ConnectionManager(
             onlineState = DeviceOnlineState.Online,
         )
         val devices = store.upsert(device)
+        if (isStaleConnect(generation) || !coroutineContext.isActive) return
         inputSender.setSecret(payload.secret)
         touchpadEngine.setTarget(
             ReceiverTarget(
@@ -263,6 +327,11 @@ class ConnectionManager(
             packetsReceived = status.packetsReceived,
             error = null,
         )
+        PhonePadLogger.i(
+            "connection",
+            "connected",
+            "device_id=${PhonePadLogger.shortId(device.id)} host=$host tcp=${resolved.tcpPort} udp=${resolved.udpPort}",
+        )
         haptics.connected()
         startMonitor(device)
         if (fromScan) {
@@ -274,7 +343,7 @@ class ConnectionManager(
         if (!payload.needsDiscovery()) {
             return payload
         }
-        val discovered = DiscoveryClient.discover(
+        val discovered = discoverDesktop(
             deviceId = payload.deviceId,
             secret = payload.secret,
             discoveryPort = payload.discoveryPort,
@@ -287,7 +356,50 @@ class ConnectionManager(
         )
     }
 
+    private suspend fun discoverDesktop(
+        deviceId: String,
+        secret: String,
+        discoveryPort: Int,
+    ): DiscoveryClient.Result? {
+        val knownHosts = store.load()
+            .map { it.host.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+        PhonePadLogger.d(
+            "discovery",
+            "discover_start",
+            "device_id=${PhonePadLogger.shortId(deviceId)} port=$discoveryPort targets=${knownHosts.size + 1}",
+        )
+        val result = DiscoveryClient.discover(
+            deviceId = deviceId,
+            secret = secret,
+            discoveryPort = discoveryPort,
+            extraHosts = knownHosts,
+        )
+        if (result == null) {
+            PhonePadLogger.w(
+                "discovery",
+                "discover_timeout",
+                "device_id=${PhonePadLogger.shortId(deviceId)} port=$discoveryPort",
+            )
+        } else {
+            PhonePadLogger.i(
+                "discovery",
+                "discover_response",
+                "device_id=${PhonePadLogger.shortId(deviceId)} host=${result.host} name=${result.deviceName}",
+            )
+        }
+        return result
+    }
+
     fun disconnect() {
+        connectJob?.cancel()
+        ++connectGeneration
+        PhonePadLogger.i(
+            "connection",
+            "disconnect",
+            "device_id=${PhonePadLogger.shortId(uiState.activeDeviceId)}",
+        )
         stopActiveTransfer()
         releaseHeldKeyboardModifiers()
         monitorJob?.cancel()
@@ -312,9 +424,37 @@ class ConnectionManager(
         refreshOnlineStates()
     }
 
+    /** 当前可切换的在线设备：active 设备视为在线，其余仅保留 Online 状态。 */
+    fun onlineSwitchableDevices(): List<PairedDevice> {
+        val activeId = uiState.activeDeviceId
+        return uiState.pairedDevices.filter { device ->
+            device.id == activeId || device.onlineState == DeviceOnlineState.Online
+        }
+    }
+
     fun openDevicePicker() {
-        uiState = uiState.copy(showDevicePicker = true)
-        refreshOnlineStates()
+        val online = onlineSwitchableDevices()
+        when {
+            online.size <= 1 -> {
+                uiState = uiState.copy(showDevicePicker = false)
+            }
+            online.size == 2 -> {
+                uiState = uiState.copy(showDevicePicker = false)
+                val other = online.firstOrNull { it.id != uiState.activeDeviceId }
+                if (other != null) {
+                    PhonePadLogger.i(
+                        "connection",
+                        "switch_device",
+                        "from=${PhonePadLogger.shortId(uiState.activeDeviceId)} to=${PhonePadLogger.shortId(other.id)} mode=direct",
+                    )
+                    connectToDevice(other.id)
+                }
+            }
+            else -> {
+                uiState = uiState.copy(showDevicePicker = true)
+                refreshOnlineStates()
+            }
+        }
     }
 
     fun closeDevicePicker() {
@@ -600,12 +740,20 @@ class ConnectionManager(
                 if (status == null || !status.running) {
                     consecutiveFailures++
                     if (consecutiveFailures >= 2) {
-                        val rediscovered = DiscoveryClient.discover(
+                        val rediscovered = discoverDesktop(
                             deviceId = currentDevice.id,
                             secret = currentDevice.secret,
+                            discoveryPort = Protocol.UDP_DISCOVERY_PORT,
                         )
                         if (rediscovered != null) {
                             val hostChanged = rediscovered.host != currentDevice.host
+                            if (hostChanged) {
+                                PhonePadLogger.i(
+                                    "connection",
+                                    "rediscover_host",
+                                    "device_id=${PhonePadLogger.shortId(currentDevice.id)} host=${rediscovered.host}",
+                                )
+                            }
                             currentDevice = currentDevice.copy(
                                 host = rediscovered.host,
                                 tcpPort = rediscovered.tcpPort,
@@ -636,8 +784,13 @@ class ConnectionManager(
                     }
                     if (status == null || !status.running) {
                         if (consecutiveFailures >= 5) {
+                            PhonePadLogger.w(
+                                "connection",
+                                "monitor_disconnect",
+                                "device_id=${PhonePadLogger.shortId(device.id)} failures=$consecutiveFailures",
+                            )
                             disconnect()
-                            uiState = uiState.copy(error = "与 ${device.name} 的连接已断开。")
+                            uiState = uiState.copy(error = "与 ${currentDevice.name} 的连接已断开。")
                             break
                         }
                     } else {

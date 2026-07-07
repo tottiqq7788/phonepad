@@ -1,5 +1,6 @@
 package cn.phonepad.net
 
+import cn.phonepad.logging.PhonePadLogger
 import cn.phonepad.protocol.Protocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,13 +23,19 @@ object DiscoveryClient {
         deviceId: String,
         secret: String,
         discoveryPort: Int = Protocol.UDP_DISCOVERY_PORT,
-        timeoutMs: Long = 2500,
+        timeoutMs: Long = 4000,
+        extraHosts: List<String> = emptyList(),
     ): Result? = withContext(Dispatchers.IO) {
         val socket = DatagramSocket()
         socket.soTimeout = 200
         socket.broadcast = true
         try {
-            val targets = broadcastTargets(discoveryPort)
+            val targets = broadcastTargets(discoveryPort, extraHosts)
+            PhonePadLogger.d(
+                "discovery",
+                "discover_targets",
+                "device_id=${PhonePadLogger.shortId(deviceId)} count=${targets.size} port=$discoveryPort",
+            )
             val deadline = System.currentTimeMillis() + timeoutMs
             while (System.currentTimeMillis() < deadline) {
                 val nonce = Random.nextInt(1, Int.MAX_VALUE)
@@ -40,6 +47,12 @@ object DiscoveryClient {
                     runCatching {
                         socket.send(
                             DatagramPacket(requestBytes, requestBytes.size, address, port),
+                        )
+                    }.onFailure { err ->
+                        PhonePadLogger.d(
+                            "discovery",
+                            "discover_send_failed",
+                            "target=${address.hostAddress}:$port reason=${err.message ?: "unknown"}",
                         )
                     }
                 }
@@ -59,6 +72,11 @@ object DiscoveryClient {
                     nonce = nonce,
                 )?.let { return@withContext it }
             }
+            PhonePadLogger.w(
+                "discovery",
+                "discover_timeout",
+                "device_id=${PhonePadLogger.shortId(deviceId)} port=$discoveryPort timeout_ms=$timeoutMs",
+            )
             null
         } finally {
             socket.close()
@@ -74,7 +92,14 @@ object DiscoveryClient {
         if (jsonString(payload, "type") != "discoverResponse") return null
         if (jsonString(payload, "deviceId") != deviceId) return null
         val expectedAuth = Protocol.authToken(secret, nonce + 1)
-        if (jsonLong(payload, "auth") != expectedAuth) return null
+        if (jsonLong(payload, "auth") != expectedAuth) {
+            PhonePadLogger.w(
+                "discovery",
+                "discover_auth_failed",
+                "device_id=${PhonePadLogger.shortId(deviceId)}",
+            )
+            return null
+        }
         val host = jsonString(payload, "ip")?.trim().orEmpty()
         if (host.isBlank()) return null
         return Result(
@@ -104,8 +129,13 @@ object DiscoveryClient {
         return value.replace("\\", "\\\\").replace("\"", "\\\"")
     }
 
-    private fun broadcastTargets(port: Int): List<Pair<InetAddress, Int>> {
+    private fun broadcastTargets(port: Int, extraHosts: List<String>): List<Pair<InetAddress, Int>> {
         val targets = linkedSetOf<Pair<InetAddress, Int>>()
+        extraHosts.forEach { host ->
+            runCatching {
+                targets.add(InetAddress.getByName(host.trim()) to port)
+            }
+        }
         runCatching {
             targets.add(InetAddress.getByName("255.255.255.255") to port)
         }

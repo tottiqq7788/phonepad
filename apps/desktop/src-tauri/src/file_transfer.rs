@@ -14,6 +14,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::{
+    logging::{self, short_id},
     notify,
     platform,
     preferences::AppPreferences,
@@ -118,6 +119,19 @@ impl FileTransferManager {
         }
 
         let token = file_transfer_token(secret, transfer_id);
+        logging::info(
+            "file_transfer",
+            "file_begin_prepared",
+            &format!(
+                "transfer_id={} file={} size={} batch={} index={}/{}",
+                short_id(transfer_id),
+                safe_name,
+                file_size,
+                short_id(batch_id),
+                file_index,
+                total_files
+            ),
+        );
         let pending = PendingFile {
             transfer_id: transfer_id.to_string(),
             file_name: safe_name,
@@ -166,6 +180,11 @@ impl FileTransferManager {
         let pending = match self.pending.lock().unwrap().remove(transfer_id) {
             Some(pending) => pending,
             None => {
+                logging::warn(
+                    "file_transfer",
+                    "file_commit_failed",
+                    &format!("transfer_id={} reason=missing_session", short_id(transfer_id)),
+                );
                 return FileCommitResponse {
                     ok: false,
                     error: Some("传输会话不存在或已过期".into()),
@@ -178,6 +197,16 @@ impl FileTransferManager {
             let batch_id = pending.batch_id.clone();
             let _ = fs::remove_file(&pending.part_path);
             self.cleanup_batch_if_idle(&batch_id);
+            logging::warn(
+                "file_transfer",
+                "file_commit_failed",
+                &format!(
+                    "transfer_id={} reason=size_mismatch received={} expected={}",
+                    short_id(transfer_id),
+                    pending.received,
+                    pending.file_size
+                ),
+            );
             return FileCommitResponse {
                 ok: false,
                 error: Some("文件未完整接收".into()),
@@ -190,6 +219,14 @@ impl FileTransferManager {
             let batch_id = pending.batch_id.clone();
             let _ = fs::remove_file(&pending.part_path);
             self.cleanup_batch_if_idle(&batch_id);
+            logging::error(
+                "file_transfer",
+                "file_commit_failed",
+                &format!(
+                    "transfer_id={} reason=save_failed detail={err}",
+                    short_id(transfer_id)
+                ),
+            );
             return FileCommitResponse {
                 ok: false,
                 error: Some(format!("保存文件失败: {err}")),
@@ -224,12 +261,30 @@ impl FileTransferManager {
         if let Some(dir) = open_dir {
             if preferences.open_folder_after_transfer {
                 if let Err(err) = platform::open_path_in_file_manager(&dir) {
+                    logging::warn(
+                        "file_transfer",
+                        "open_folder_failed",
+                        &format!("path={} reason={err}", dir.display()),
+                    );
                     notify::show_error(app, &format!("文件已保存，但打开文件夹失败: {err}"));
                 } else {
                     notify::show_info(app, &format!("已接收 {} 个文件", pending.total_files));
                 }
             }
         }
+
+        logging::info(
+            "file_transfer",
+            "file_commit",
+            &format!(
+                "transfer_id={} saved_path={} batch={} index={}/{}",
+                short_id(transfer_id),
+                saved_path,
+                short_id(&pending.batch_id),
+                pending.file_index,
+                pending.total_files
+            ),
+        );
 
         FileCommitResponse {
             ok: true,
@@ -246,6 +301,16 @@ impl FileTransferManager {
         if let Some(pending) = removed {
             let _ = fs::remove_file(&pending.part_path);
             self.cleanup_batch_if_idle(&pending.batch_id);
+            logging::info(
+                "file_transfer",
+                "file_cancel",
+                &format!(
+                    "transfer_id={} file={} batch={}",
+                    short_id(transfer_id),
+                    pending.file_name,
+                    short_id(&pending.batch_id)
+                ),
+            );
         }
     }
 
@@ -327,10 +392,19 @@ pub fn spawn_file_transfer_loop(
         let listener = match TcpListener::bind(("0.0.0.0", TCP_FILE_PORT)) {
             Ok(listener) => listener,
             Err(err) => {
-                eprintln!("failed to bind file transfer port: {err}");
+                logging::error(
+                    "file_transfer",
+                    "file_port_bind_failed",
+                    &format!("port={TCP_FILE_PORT} reason={err}"),
+                );
                 return;
             }
         };
+        logging::info(
+            "file_transfer",
+            "file_port_listening",
+            &format!("port={TCP_FILE_PORT}"),
+        );
         let _ = listener.set_nonblocking(true);
 
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
@@ -339,7 +413,11 @@ pub fn spawn_file_transfer_loop(
                     let manager = manager.clone();
                     thread::spawn(move || {
                         if let Err(err) = handle_file_upload(stream, peer, manager) {
-                            eprintln!("file upload failed from {peer}: {err}");
+                            logging::error(
+                                "file_transfer",
+                                "file_upload_failed",
+                                &format!("peer={peer} reason={err}"),
+                            );
                         }
                     });
                 }
@@ -389,6 +467,11 @@ fn handle_file_upload(
         None => return fail_upload(&mut stream, "传输会话不存在"),
     };
     if pending.token != token {
+        logging::warn(
+            "file_transfer",
+            "auth_failed",
+            &format!("transfer_id={}", short_id(&transfer_id)),
+        );
         return fail_upload(&mut stream, "认证失败");
     }
 
@@ -426,9 +509,29 @@ fn handle_file_upload(
     };
     if updated.received != updated.file_size {
         manager.cancel_transfer(&transfer_id);
+        logging::warn(
+            "file_transfer",
+            "file_upload_failed",
+            &format!(
+                "transfer_id={} reason=size_mismatch received={} expected={}",
+                short_id(&transfer_id),
+                updated.received,
+                updated.file_size
+            ),
+        );
         return fail_upload(&mut stream, "文件未完整接收");
     }
 
+    logging::info(
+        "file_transfer",
+        "file_upload",
+        &format!(
+            "transfer_id={} file={} size={}",
+            short_id(&transfer_id),
+            updated.file_name,
+            updated.file_size
+        ),
+    );
     write_upload_response(&mut stream, true, None)
 }
 

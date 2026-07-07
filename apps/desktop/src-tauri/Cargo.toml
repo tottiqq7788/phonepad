@@ -1,6 +1,6 @@
 [package]
 name = "phonepad-desktop"
-version = "0.9.1"
+version = "0.10.0"
 description = "Low-latency desktop receiver for PhonePad."
 authors = ["PhonePad"]
 license = "MIT"

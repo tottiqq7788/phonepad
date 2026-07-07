@@ -473,7 +473,10 @@ private fun TouchpadScreen(
 
                 if (state.showDevicePicker) {
                     DevicePickerOverlay(
-                        devices = state.pairedDevices,
+                        devices = state.pairedDevices.filter { device ->
+                            device.id == state.activeDeviceId ||
+                                device.onlineState == DeviceOnlineState.Online
+                        },
                         activeDeviceId = state.activeDeviceId,
                         onDismiss = onCloseDevicePicker,
                         onSelectDevice = onSelectDevice,
@@ -1015,12 +1018,17 @@ private fun LeftRail(
 
         Spacer(modifier = Modifier.weight(1f))
 
-        RailIconButton(
-            icon = Icons.Filled.SwapHoriz,
-            contentDescription = "切换设备",
-            onClick = onOpenDevicePicker,
-            accent = TextSecondary,
-        )
+        val onlineSwitchableCount = state.pairedDevices.count { device ->
+            device.id == state.activeDeviceId || device.onlineState == DeviceOnlineState.Online
+        }
+        if (onlineSwitchableCount >= 2) {
+            RailIconButton(
+                icon = Icons.Filled.SwapHoriz,
+                contentDescription = "切换设备",
+                onClick = onOpenDevicePicker,
+                accent = TextSecondary,
+            )
+        }
 
         RailButton(label = "?", onClick = onToggleHelp, accent = TextSecondary)
 

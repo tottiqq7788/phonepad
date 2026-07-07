@@ -12,8 +12,8 @@ android {
         applicationId = "cn.phonepad"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.9.1"
+        versionCode = 12
+        versionName = "0.10.0"
     }
 
     buildTypes {
@@ -59,6 +59,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
     testImplementation("androidx.test:core:1.6.1")
+    testImplementation("org.json:json:20240303")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

@@ -25,12 +25,22 @@ pub fn build_pairing_info(device: &DeviceConfig, last_client: Option<&str>) -> P
     let recommended = select_recommended_ip(&candidates, last_client);
     let all_ips: Vec<String> = candidates.iter().map(|c| c.ip.to_string()).collect();
 
-    let connection_url = format!(
-        "phonepad://pair?tcp={TCP_CONTROL_PORT}&udp={UDP_INPUT_PORT}&discovery={UDP_DISCOVERY_PORT}&id={}&name={}&secret={}",
-        urlencoding::encode(&device.device_id),
-        urlencoding::encode(&device.device_name),
-        urlencoding::encode(&device.pairing_secret),
-    );
+    let connection_url = if recommended.is_empty() {
+        format!(
+            "phonepad://pair?tcp={TCP_CONTROL_PORT}&udp={UDP_INPUT_PORT}&discovery={UDP_DISCOVERY_PORT}&id={}&name={}&secret={}",
+            urlencoding::encode(&device.device_id),
+            urlencoding::encode(&device.device_name),
+            urlencoding::encode(&device.pairing_secret),
+        )
+    } else {
+        format!(
+            "phonepad://pair?host={}&tcp={TCP_CONTROL_PORT}&udp={UDP_INPUT_PORT}&discovery={UDP_DISCOVERY_PORT}&id={}&name={}&secret={}",
+            urlencoding::encode(&recommended),
+            urlencoding::encode(&device.device_id),
+            urlencoding::encode(&device.device_name),
+            urlencoding::encode(&device.pairing_secret),
+        )
+    };
 
     PairingInfo {
         connection_url,
@@ -312,17 +322,18 @@ mod tests {
     }
 
     #[test]
-    fn pairing_url_contains_device_identity_without_host() {
+    fn pairing_url_contains_host_when_recommended_ip_available() {
         let device = DeviceConfig {
             device_id: "dev-1".into(),
             device_name: "My PC".into(),
             pairing_secret: "secret123".into(),
         };
-        let info = build_pairing_info(&device, None);
+        let info = build_pairing_info(&device, Some("10.40.184.236:45455"));
         assert!(info.connection_url.contains("id=dev-1"));
         assert!(info.connection_url.contains("secret=secret123"));
         assert!(info.connection_url.contains("name=My"));
         assert!(info.connection_url.contains("discovery=45456"));
-        assert!(!info.connection_url.contains("host="));
+        assert!(info.connection_url.contains("host="));
+        assert!(!info.recommended_ip.is_empty());
     }
 }

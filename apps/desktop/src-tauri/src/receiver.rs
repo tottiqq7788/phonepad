@@ -21,6 +21,7 @@ use crate::{
     device_config::DeviceConfig,
     file_transfer::{self, FileBeginResponse, FileCommitResponse, FileTransferManager},
     input::{normalize_key_repeat, parse_key_action, parse_key_event, reset_modifier_tracker, InputController},
+    logging::{self, short_id},
     platform,
     preferences::AppPreferences,
     settings::ReceiverSettings,
@@ -163,6 +164,7 @@ pub fn start(
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let device_snapshot = device.lock().unwrap().clone();
+    let device_id_short = short_id(&device_snapshot.device_id);
     let status = Arc::new(Mutex::new(ReceiverStatus {
         running: true,
         device_id: device_snapshot.device_id,
@@ -192,6 +194,14 @@ pub fn start(
         status.clone(),
     );
     let file_handle = file_transfer::spawn_file_transfer_loop(file_transfer, shutdown.clone());
+
+    logging::info(
+        "connection",
+        "receiver_started",
+        &format!(
+            "udp={UDP_INPUT_PORT} tcp={TCP_CONTROL_PORT} file={TCP_FILE_PORT} discovery={UDP_DISCOVERY_PORT} device_id={device_id_short}",
+        ),
+    );
 
     Ok(ReceiverHandle {
         shutdown,
@@ -241,6 +251,11 @@ fn spawn_input_loop(
             let expected_token = auth_token(&device_config.pairing_secret, packet.sequence);
             if packet.auth_token != expected_token {
                 status.lock().unwrap().packets_dropped += 1;
+                logging::debug(
+                    "udp_input",
+                    "auth_failed",
+                    &format!("peer={peer} seq={}", packet.sequence),
+                );
                 continue;
             }
 
@@ -360,8 +375,18 @@ fn spawn_discovery_loop(
                 }
                 if request.auth != discover_request_auth(&device_config.pairing_secret, request.nonce)
                 {
+                    logging::warn(
+                        "discovery",
+                        "discover_auth_failed",
+                        &format!("peer={ip} device_id={}", short_id(&request.device_id)),
+                    );
                     continue;
                 }
+                logging::debug(
+                    "discovery",
+                    "discover_request",
+                    &format!("peer={ip} device_id={}", short_id(&request.device_id)),
+                );
                 let payload = DiscoverResponse::new(
                     device_config.device_id.clone(),
                     device_config.device_name.clone(),
@@ -518,6 +543,11 @@ fn handle_control_connection(
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let (request_text, oversize) = read_control_request(&mut stream).unwrap_or_default();
     if oversize {
+        logging::warn(
+            "control",
+            "request_oversize",
+            &format!("peer={peer} max_bytes={MAX_CONTROL_REQUEST_BYTES}"),
+        );
         write_control_response(
             &mut stream,
             &ControlResponse {
@@ -533,6 +563,7 @@ fn handle_control_connection(
     let request = match serde_json::from_str::<ControlRequest>(&request_text) {
         Ok(request) => request,
         Err(_) => {
+            logging::warn("control", "request_invalid_json", &format!("peer={peer}"));
             write_control_response(
                 &mut stream,
                 &ControlResponse {
@@ -555,6 +586,15 @@ fn handle_control_connection(
     ];
     if !device_config.validate_secret(&request.device_id, &request.secret) {
         if authed_types.contains(&request.request_type.as_str()) {
+            logging::warn(
+                "control",
+                "auth_failed",
+                &format!(
+                    "peer={peer} type={} device_id={}",
+                    request.request_type,
+                    short_id(&request.device_id)
+                ),
+            );
             write_auth_failure(&mut stream);
         }
         return;
@@ -574,6 +614,7 @@ fn handle_control_connection(
             let _ = app.emit("receiver://status", snapshot);
         }
         "text" => {
+            let char_count = request.content.as_ref().map(|value| value.chars().count()).unwrap_or(0);
             let response = match input.lock() {
                 Ok(mut controller) => handle_text_request(&mut controller, request.content),
                 Err(_) => ControlResponse {
@@ -583,11 +624,22 @@ fn handle_control_connection(
             };
             let succeeded = response.ok;
             write_control_response(&mut stream, &response);
+            logging::info(
+                "text_input",
+                "text_request",
+                &format!(
+                    "peer={peer} ok={succeeded} chars={char_count} error={}",
+                    response.error.as_deref().unwrap_or("-")
+                ),
+            );
             if succeeded {
                 status.lock().unwrap().last_client = Some(peer.to_string());
             }
         }
         "key" => {
+            let key_action = request.action.as_deref().unwrap_or("-").to_string();
+            let key_event = request.event.as_deref().unwrap_or("-").to_string();
+            let key_repeat = request.repeat.unwrap_or(1);
             let response = match input.lock() {
                 Ok(mut controller) => {
                     handle_key_request(&mut controller, request.action, request.event, request.repeat)
@@ -599,6 +651,14 @@ fn handle_control_connection(
             };
             let succeeded = response.ok;
             write_control_response(&mut stream, &response);
+            logging::info(
+                "keyboard",
+                "key_request",
+                &format!(
+                    "peer={peer} ok={succeeded} action={key_action} event={key_event} repeat={key_repeat} error={}",
+                    response.error.as_deref().unwrap_or("-")
+                ),
+            );
             if succeeded {
                 status.lock().unwrap().last_client = Some(peer.to_string());
             }
@@ -648,6 +708,18 @@ fn handle_control_connection(
                     token: None,
                 },
             };
+            logging::info(
+                "file_transfer",
+                if response.ok { "file_begin" } else { "file_begin_failed" },
+                &format!(
+                    "peer={peer} ok={} transfer_id={} file={} size={} error={}",
+                    response.ok,
+                    short_id(request.transfer_id.as_deref().unwrap_or("-")),
+                    request.file_name.as_deref().unwrap_or("-"),
+                    request.file_size.unwrap_or(0),
+                    response.error.as_deref().unwrap_or("-")
+                ),
+            );
             if response.ok {
                 status.lock().unwrap().last_client = Some(peer.to_string());
             }
@@ -672,6 +744,17 @@ fn handle_control_connection(
                     saved_path: None,
                 },
             };
+            logging::info(
+                "file_transfer",
+                if response.ok { "file_commit" } else { "file_commit_failed" },
+                &format!(
+                    "peer={peer} ok={} transfer_id={} saved_path={} error={}",
+                    response.ok,
+                    short_id(request.transfer_id.as_deref().unwrap_or("-")),
+                    response.saved_path.as_deref().unwrap_or("-"),
+                    response.error.as_deref().unwrap_or("-")
+                ),
+            );
             if response.ok {
                 status.lock().unwrap().last_client = Some(peer.to_string());
             }
@@ -679,6 +762,11 @@ fn handle_control_connection(
         }
         "fileCancel" => {
             if let Some(transfer_id) = request.transfer_id.as_deref() {
+                logging::info(
+                    "file_transfer",
+                    "file_cancel",
+                    &format!("peer={peer} transfer_id={}", short_id(transfer_id)),
+                );
                 file_transfer.cancel_transfer(transfer_id);
             }
             write_control_response(

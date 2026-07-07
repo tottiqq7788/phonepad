@@ -1,5 +1,6 @@
 package cn.phonepad.net
 
+import cn.phonepad.logging.PhonePadLogger
 import cn.phonepad.protocol.Protocol
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -184,12 +185,39 @@ class ControlClient {
         request: String,
         parse: (String) -> T,
     ): T? {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(host, port), 3000)
-            socket.soTimeout = 3000
-            socket.getOutputStream().write(request.toByteArray())
-            val jsonText = TcpStatusReader.readJson(socket.getInputStream()) ?: return null
-            return parse(jsonText)
+        val requestType = runCatching {
+            JSONObject(request.trim()).optString("type", "unknown")
+        }.getOrDefault("unknown")
+        val startedAt = System.currentTimeMillis()
+        return try {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress(host, port), 3000)
+                socket.soTimeout = 3000
+                socket.getOutputStream().write(request.toByteArray())
+                val jsonText = TcpStatusReader.readJson(socket.getInputStream()) ?: run {
+                    PhonePadLogger.w(
+                        "control",
+                        "control_no_response",
+                        "type=$requestType host=$host port=$port elapsed_ms=${System.currentTimeMillis() - startedAt}",
+                    )
+                    return null
+                }
+                val result = parse(jsonText)
+                PhonePadLogger.d(
+                    "control",
+                    "control_request",
+                    "type=$requestType host=$host port=$port elapsed_ms=${System.currentTimeMillis() - startedAt}",
+                )
+                result
+            }
+        } catch (err: Exception) {
+            PhonePadLogger.w(
+                "control",
+                "tcp_connect_failed",
+                "type=$requestType host=$host port=$port elapsed_ms=${System.currentTimeMillis() - startedAt} reason=${err.message ?: "unknown"}",
+                err,
+            )
+            null
         }
     }
 }
