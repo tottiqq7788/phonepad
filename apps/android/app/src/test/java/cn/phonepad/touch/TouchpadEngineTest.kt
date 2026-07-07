@@ -23,7 +23,11 @@ class TouchpadEngineTest {
     fun setUp() {
         sender = RecordingInputSender()
         val context = ApplicationProvider.getApplicationContext<Context>()
-        engine = TouchpadEngine(sender, HapticsManager(context))
+        engine = TouchpadEngine(
+            sender = sender,
+            haptics = HapticsManager(context),
+            enableScheduledFlush = false,
+        )
         engine.setTarget(ReceiverTarget(host = "192.168.1.12", udpPort = 45454))
     }
 
@@ -31,6 +35,7 @@ class TouchpadEngineTest {
     fun oneFingerMoveSendsMovePacket() {
         engine.onPointerDown(1, 100f, 100f, 0L)
         engine.onPointerMove(1, 110f, 105f)
+        engine.flushPendingMotionForTest()
         assertEquals(1, sender.packets.size)
         assertEquals(Protocol.PacketKind.Move, sender.packets.first().kind)
     }
@@ -48,10 +53,12 @@ class TouchpadEngineTest {
     fun twoFingerScrollAfterSecondFingerDown() {
         engine.onPointerDown(1, 100f, 100f, 0L)
         engine.onPointerMove(1, 120f, 100f)
+        engine.flushPendingMotionForTest()
         sender.packets.clear()
 
         engine.onPointerDown(2, 110f, 100f, 50L)
         engine.onPointerMove(2, 110f, 130f)
+        engine.flushPendingMotionForTest()
 
         assertTrue(sender.packets.isNotEmpty())
         assertEquals(Protocol.PacketKind.Scroll, sender.packets.first().kind)
@@ -79,6 +86,7 @@ class TouchpadEngineTest {
     fun twoFingerScrollDoesNotClickAfterStaggeredRelease() {
         engine.onPointerDown(2, 100f, 100f, 0L)
         engine.onPointerMove(2, 100f, 130f)
+        engine.flushPendingMotionForTest()
         sender.packets.clear()
         engine.onPointerUp(1, 100f, 130f, 120L)
         engine.onPointerUp(0, 100f, 130f, 140L)
@@ -106,9 +114,75 @@ class TouchpadEngineTest {
     fun accidentalSecondFingerAfterMoveDoesNotTriggerRightClick() {
         engine.onPointerDown(1, 100f, 100f, 0L)
         engine.onPointerMove(1, 110f, 100f)
+        engine.flushPendingMotionForTest()
         engine.onPointerDown(2, 105f, 100f, 40L)
         engine.onPointerUp(0, 105f, 100f, 120L)
         assertTrue(sender.packets.none { it.kind == Protocol.PacketKind.Click && it.button == Protocol.MouseButton.Right })
+    }
+
+    @Test
+    fun slowMoveAccumulatesFractionalDisplacement() {
+        engine.onPointerDown(1, 100f, 100f, 0L)
+        repeat(4) { step ->
+            engine.onPointerMove(1, 100f + 0.5f * (step + 1), 100f)
+        }
+        engine.flushPendingMotionForTest()
+        assertEquals(1, sender.packets.size)
+        val packet = sender.packets.first()
+        assertEquals(Protocol.PacketKind.Move, packet.kind)
+        assertEquals(2, packet.x.toInt())
+        assertEquals(0, packet.y.toInt())
+    }
+
+    @Test
+    fun fastMovePreservesTotalDisplacementAcrossFrames() {
+        engine.onPointerDown(1, 0f, 0f, 0L)
+        engine.onPointerMove(1, 30f, -12f)
+        engine.flushPendingMotionForTest()
+        engine.onPointerMove(1, 45f, 8f)
+        engine.flushPendingMotionForTest()
+        val totalX = sender.packets.sumOf { it.x.toLong() }.toInt()
+        val totalY = sender.packets.sumOf { it.y.toLong() }.toInt()
+        assertEquals(45, totalX)
+        assertEquals(8, totalY)
+    }
+
+    @Test
+    fun slowScrollDoesNotDropSmallIncrementsAfterStart() {
+        engine.onPointerDown(2, 100f, 100f, 0L)
+        engine.onPointerMove(2, 100f, 120f)
+        engine.flushPendingMotionForTest()
+        sender.packets.clear()
+        repeat(5) { step ->
+            engine.onPointerMove(2, 100f, 120f + 0.5f * (step + 1))
+        }
+        engine.flushPendingMotionForTest()
+        assertEquals(1, sender.packets.size)
+        assertEquals(Protocol.PacketKind.Scroll, sender.packets.first().kind)
+        assertEquals(2, sender.packets.first().y.toInt())
+    }
+
+    @Test
+    fun pointerUpFlushesRemainingMotion() {
+        engine.onPointerDown(1, 100f, 100f, 0L)
+        engine.onPointerMove(1, 103f, 100f)
+        engine.onPointerUp(0, 103f, 100f, 80L)
+        assertEquals(1, sender.packets.size)
+        assertEquals(Protocol.PacketKind.Move, sender.packets.first().kind)
+        assertEquals(3, sender.packets.first().x.toInt())
+    }
+
+    @Test
+    fun secondFingerDownFlushesPendingSingleFingerMove() {
+        engine.onPointerDown(1, 100f, 100f, 0L)
+        engine.onPointerMove(1, 108f, 100f)
+        sender.packets.clear()
+
+        engine.onPointerDown(2, 105f, 100f, 40L)
+
+        assertEquals(1, sender.packets.size)
+        assertEquals(Protocol.PacketKind.Move, sender.packets.first().kind)
+        assertEquals(8, sender.packets.first().x.toInt())
     }
 
     private class RecordingInputSender : InputSender() {

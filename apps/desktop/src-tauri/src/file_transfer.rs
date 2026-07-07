@@ -438,6 +438,7 @@ fn handle_file_upload(
     _peer: SocketAddr,
     manager: Arc<FileTransferManager>,
 ) -> Result<(), String> {
+    stream.set_nonblocking(false).map_err(|err| err.to_string())?;
     stream
         .set_read_timeout(Some(Duration::from_secs(120)))
         .map_err(|err| err.to_string())?;

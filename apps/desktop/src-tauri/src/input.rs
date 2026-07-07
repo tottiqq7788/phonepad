@@ -72,6 +72,11 @@ impl InputController {
             .map_err(|err| err.to_string())
     }
 
+    pub fn reset_scroll_remainder(&mut self) {
+        self.scroll_remainder_x = 0.0;
+        self.scroll_remainder_y = 0.0;
+    }
+
     pub fn scroll(&mut self, dx: i16, dy: i16, settings: &ReceiverSettings) -> Result<(), String> {
         self.scroll_remainder_x += f64::from(dx) * settings.scroll_sensitivity / 8.0;
         self.scroll_remainder_y += f64::from(-dy) * settings.scroll_sensitivity / 8.0;

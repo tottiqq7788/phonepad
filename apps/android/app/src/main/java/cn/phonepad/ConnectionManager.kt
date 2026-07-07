@@ -424,6 +424,44 @@ class ConnectionManager(
         refreshOnlineStates()
     }
 
+    fun removePairedDevice(deviceId: String) {
+        if (deviceId.isBlank()) {
+            return
+        }
+        val wasActive = uiState.activeDeviceId == deviceId
+        if (wasActive) {
+            connectJob?.cancel()
+            ++connectGeneration
+            stopActiveTransfer()
+            releaseHeldKeyboardModifiers()
+            monitorJob?.cancel()
+            textSendJob?.cancel()
+            touchpadEngine.setTarget(null)
+            inputSender.setSecret("")
+        }
+        val updated = store.remove(deviceId)
+        PhonePadLogger.i(
+            "connection",
+            "remove_paired_device",
+            "device_id=${PhonePadLogger.shortId(deviceId)} was_active=$wasActive",
+        )
+        uiState = uiState.copy(
+            pairedDevices = updated,
+            connected = if (wasActive) false else uiState.connected,
+            connecting = if (wasActive) false else uiState.connecting,
+            activeDeviceId = if (wasActive) "" else uiState.activeDeviceId,
+            activeDeviceName = if (wasActive) "" else uiState.activeDeviceName,
+            host = if (wasActive) "" else uiState.host,
+            lastRttMs = if (wasActive) null else uiState.lastRttMs,
+            error = null,
+            showDevicePicker = false,
+            textSending = if (wasActive) false else uiState.textSending,
+            transferSending = if (wasActive) false else uiState.transferSending,
+            transferProgress = if (wasActive) null else uiState.transferProgress,
+        )
+        refreshOnlineStates()
+    }
+
     /** 当前可切换的在线设备：active 设备视为在线，其余仅保留 Online 状态。 */
     fun onlineSwitchableDevices(): List<PairedDevice> {
         val activeId = uiState.activeDeviceId
@@ -815,6 +853,7 @@ class ConnectionManager(
         monitorJob?.cancel()
         onlineJob?.cancel()
         textSendJob?.cancel()
+        touchpadEngine.release()
         inputSender.close()
     }
 }

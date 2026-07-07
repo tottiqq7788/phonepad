@@ -138,6 +138,7 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             state = state,
             onScan = connectionManager::pairFromScan,
             onConnectDevice = connectionManager::connectToDevice,
+            onRemoveDevice = connectionManager::removePairedDevice,
         )
     }
 }
@@ -147,6 +148,7 @@ private fun DeviceHomeScreen(
     state: ConnectionUiState,
     onScan: (String) -> Unit,
     onConnectDevice: (String) -> Unit,
+    onRemoveDevice: (String) -> Unit,
 ) {
     val context = LocalContext.current
     var scanError by remember { mutableStateOf<String?>(null) }
@@ -260,6 +262,7 @@ private fun DeviceHomeScreen(
                         device = device,
                         connecting = state.connecting,
                         onClick = { onConnectDevice(device.id) },
+                        onDelete = { onRemoveDevice(device.id) },
                     )
                 }
             }
@@ -268,7 +271,12 @@ private fun DeviceHomeScreen(
 }
 
 @Composable
-private fun PairedDeviceCard(device: PairedDevice, connecting: Boolean, onClick: () -> Unit) {
+private fun PairedDeviceCard(
+    device: PairedDevice,
+    connecting: Boolean,
+    onClick: () -> Unit,
+    onDelete: () -> Unit,
+) {
     val online = device.onlineState == DeviceOnlineState.Online
     val timeLabel = if (device.lastConnectedAt > 0) {
         SimpleDateFormat("MM/dd HH:mm", Locale.getDefault()).format(Date(device.lastConnectedAt))
@@ -316,16 +324,26 @@ private fun PairedDeviceCard(device: PairedDevice, connecting: Boolean, onClick:
                 )
             }
         }
-        Text(
-            text = when {
-                connecting -> "连接中"
-                online -> "进入"
-                else -> "连接"
-            },
-            color = if (online || connecting) Accent else TextSecondary,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = when {
+                    connecting -> "连接中"
+                    online -> "进入"
+                    else -> "连接"
+                },
+                color = if (online || connecting) Accent else TextSecondary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            IconButton(enabled = !connecting, onClick = onDelete) {
+                Icon(
+                    imageVector = Icons.Filled.Delete,
+                    contentDescription = "删除设备",
+                    tint = ErrorColor,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
     }
 }
 
@@ -432,22 +450,30 @@ private fun TouchpadScreen(
                                     val ups = event.changes.count { it.changedToUp() }
                                     val prevCount = count + ups - downs
 
-                                    if (downs > 0 && count > 0 && (prevCount == 0 || count != prevCount)) {
-                                        val center = pressedCenter(pressed)
-                                        engine.onPointerDown(count, center.first, center.second, time)
-                                    }
-                                    if (ups > 0) {
-                                        val (upX, upY) = if (count > 0) {
+                                    if (downs > 0 && ups > 0 && count == 0) {
+                                        val downChanges = event.changes.filter { it.changedToDown() }
+                                        val upChange = event.changes.first { it.changedToUp() }
+                                        val center = pressedCenter(downChanges)
+                                        engine.onPointerDown(downChanges.size, center.first, center.second, time)
+                                        engine.onPointerUp(0, upChange.position.x, upChange.position.y, time)
+                                    } else {
+                                        if (downs > 0 && count > 0 && (prevCount == 0 || count != prevCount)) {
                                             val center = pressedCenter(pressed)
-                                            center.first to center.second
-                                        } else {
-                                            val upChange = event.changes.first { it.changedToUp() }
-                                            upChange.position.x to upChange.position.y
+                                            engine.onPointerDown(count, center.first, center.second, time)
                                         }
-                                        engine.onPointerUp(count, upX, upY, time)
-                                    } else if (count > 0 && downs == 0) {
-                                        val center = pressedCenter(pressed)
-                                        engine.onPointerMove(count, center.first, center.second)
+                                        if (ups > 0) {
+                                            val (upX, upY) = if (count > 0) {
+                                                val center = pressedCenter(pressed)
+                                                center.first to center.second
+                                            } else {
+                                                val upChange = event.changes.first { it.changedToUp() }
+                                                upChange.position.x to upChange.position.y
+                                            }
+                                            engine.onPointerUp(count, upX, upY, time)
+                                        } else if (count > 0 && downs == 0) {
+                                            val center = pressedCenter(pressed)
+                                            engine.onPointerMove(count, center.first, center.second)
+                                        }
                                     }
 
                                     event.changes.forEach { it.consume() }

@@ -1,4 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+#[cfg(target_os = "windows")]
+use std::process::Command;
 
 use local_ip_address::list_afinet_netifas;
 use serde::Serialize;
@@ -63,11 +65,15 @@ struct IpCandidate {
 
 fn collect_ipv4_candidates() -> Vec<IpCandidate> {
     let mut candidates = Vec::new();
+    let preferred = preferred_ipv4s();
 
     if let Ok(interfaces) = list_afinet_netifas() {
         for (_name, ip) in interfaces {
             if let IpAddr::V4(ipv4) = ip {
                 if ipv4.is_loopback() {
+                    continue;
+                }
+                if !is_preferred_ipv4(ipv4, preferred.as_deref()) {
                     continue;
                 }
                 candidates.push(IpCandidate {
@@ -84,11 +90,20 @@ fn collect_ipv4_candidates() -> Vec<IpCandidate> {
 }
 
 fn select_recommended_ip(candidates: &[IpCandidate], last_client: Option<&str>) -> String {
+    let preferred = preferred_ipv4s();
+    select_recommended_ip_with_filter(candidates, last_client, preferred.as_deref())
+}
+
+fn select_recommended_ip_with_filter(
+    candidates: &[IpCandidate],
+    last_client: Option<&str>,
+    preferred: Option<&[Ipv4Addr]>,
+) -> String {
     if let Some(client) = last_client {
         if let Some(ip) = client.split(':').next() {
             if let Ok(peer) = ip.parse::<Ipv4Addr>() {
                 if let Some(local) = local_ip_for_peer(peer) {
-                    if !is_likely_virtual(local) {
+                    if !is_likely_virtual(local) && is_preferred_ipv4(local, preferred) {
                         return local.to_string();
                     }
                 }
@@ -96,19 +111,21 @@ fn select_recommended_ip(candidates: &[IpCandidate], last_client: Option<&str>) 
         }
     }
 
-    if let Some(ip) = recommended_ip_from_interfaces() {
+    if let Some(ip) = recommended_ip_from_interfaces(preferred) {
         return ip.to_string();
     }
 
     if let Some(ip) = outbound_ipv4() {
-        if candidates.iter().any(|c| c.ip == ip) {
+        if candidates.iter().any(|c| c.ip == ip) && is_preferred_ipv4(ip, preferred) {
             return ip.to_string();
         }
     }
 
     candidates
         .iter()
-        .filter(|c| !is_likely_virtual(c.ip) && !c.ip.is_link_local())
+        .filter(|c| {
+            !is_likely_virtual(c.ip) && !c.ip.is_link_local() && is_preferred_ipv4(c.ip, preferred)
+        })
         .max_by_key(|c| c.score)
         .map(|c| c.ip.to_string())
         .unwrap_or_default()
@@ -147,7 +164,7 @@ fn same_subnet(local: Ipv4Addr, peer: Ipv4Addr) -> bool {
     lo[0] == pe[0] && lo[1] == pe[1]
 }
 
-fn recommended_ip_from_interfaces() -> Option<Ipv4Addr> {
+fn recommended_ip_from_interfaces(preferred: Option<&[Ipv4Addr]>) -> Option<Ipv4Addr> {
     let mut best: Option<(i32, Ipv4Addr)> = None;
 
     for iface in default_net::get_interfaces() {
@@ -162,7 +179,7 @@ fn recommended_ip_from_interfaces() -> Option<Ipv4Addr> {
         if let Some(gateway) = &iface.gateway {
             if let IpAddr::V4(gateway_ip) = gateway.ip_addr {
                 if let Some(local) = local_ip_for_peer(gateway_ip) {
-                    if !is_likely_virtual(local) {
+                    if !is_likely_virtual(local) && is_preferred_ipv4(local, preferred) {
                         push_best(
                             &mut best,
                             score_ipv4(local) + wireless_bonus(label),
@@ -178,11 +195,49 @@ fn recommended_ip_from_interfaces() -> Option<Ipv4Addr> {
             if is_likely_virtual(ip) || ip.is_link_local() {
                 continue;
             }
+            if !is_preferred_ipv4(ip, preferred) {
+                continue;
+            }
             push_best(&mut best, score_ipv4(ip) + wireless_bonus(label), ip);
         }
     }
 
     best.map(|(_, ip)| ip)
+}
+
+fn is_preferred_ipv4(ip: Ipv4Addr, preferred: Option<&[Ipv4Addr]>) -> bool {
+    preferred.map(|items| items.contains(&ip)).unwrap_or(true)
+}
+
+#[cfg(target_os = "windows")]
+fn preferred_ipv4s() -> Option<Vec<Ipv4Addr>> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let output = Command::new("powershell")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -ne '127.0.0.1' -and -not $_.IPAddress.StartsWith('169.254.') } | Select-Object -ExpandProperty IPAddress",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let ips: Vec<Ipv4Addr> = text.lines().filter_map(|line| line.trim().parse().ok()).collect();
+    if ips.is_empty() {
+        None
+    } else {
+        Some(ips)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn preferred_ipv4s() -> Option<Vec<Ipv4Addr>> {
+    None
 }
 
 fn push_best(best: &mut Option<(i32, Ipv4Addr)>, score: i32, ip: Ipv4Addr) {
@@ -298,7 +353,12 @@ mod tests {
                 score: score_ipv4("10.40.184.10".parse().unwrap()),
             },
         ];
-        let selected = select_recommended_ip(&candidates, Some("10.40.184.236:45455"));
+        let preferred = ["10.40.184.10".parse().unwrap()];
+        let selected = select_recommended_ip_with_filter(
+            &candidates,
+            Some("10.40.184.236:45455"),
+            Some(&preferred),
+        );
         assert_eq!(selected, "10.40.184.10");
     }
 

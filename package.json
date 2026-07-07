@@ -1,6 +1,6 @@
 {
   "name": "phonepad",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "private": true,
   "description": "Low-latency Android touchpad for Windows and macOS.",
   "workspaces": [

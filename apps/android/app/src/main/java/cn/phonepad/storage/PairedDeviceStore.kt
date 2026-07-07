@@ -45,6 +45,12 @@ class PairedDeviceStore(context: Context) {
         return current
     }
 
+    fun remove(deviceId: String): List<PairedDevice> {
+        val updated = load().filterNot { it.id == deviceId }
+        save(updated)
+        return updated
+    }
+
     fun updateOnlineStates(states: Map<String, DeviceOnlineState>): List<PairedDevice> {
         val updated = load().map { device ->
             device.copy(onlineState = states[device.id] ?: device.onlineState)
