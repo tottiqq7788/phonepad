@@ -17,6 +17,10 @@ pub fn default_download_dir() -> Option<std::path::PathBuf> {
     dirs::document_dir()
 }
 
+pub fn default_screenshot_dir() -> Option<std::path::PathBuf> {
+    crate::screenshot::default_screenshot_dir()
+}
+
 pub fn pick_folder_dialog() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "windows")]
     {

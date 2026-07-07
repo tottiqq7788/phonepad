@@ -185,6 +185,80 @@ class TouchpadEngineTest {
         assertEquals(8, sender.packets.first().x.toInt())
     }
 
+    @Test
+    fun threeFingerSwipeUpSendsGesturePacket() {
+        engine.onPointerDown(3, 100f, 200f, 0L)
+        engine.onPointerMove(3, 100f, 100f)
+        engine.onPointerUp(0, 100f, 100f, 200L)
+
+        assertEquals(1, sender.packets.size)
+        val packet = sender.packets.first()
+        assertEquals(Protocol.PacketKind.Gesture, packet.kind)
+        assertEquals(Protocol.GestureKind.SwipeUp, packet.gestureKind)
+        assertEquals(Protocol.GesturePhase.End, packet.gesturePhase)
+        assertEquals(3.toByte(), packet.fingers)
+    }
+
+    @Test
+    fun fourFingerSwipeLeftSendsGesturePacket() {
+        engine.onPointerDown(4, 200f, 100f, 0L)
+        engine.onPointerMove(4, 100f, 100f)
+        engine.onPointerUp(0, 100f, 100f, 200L)
+
+        assertEquals(1, sender.packets.size)
+        val packet = sender.packets.first()
+        assertEquals(Protocol.PacketKind.Gesture, packet.kind)
+        assertEquals(Protocol.GestureKind.SwipeLeft, packet.gestureKind)
+        assertEquals(4.toByte(), packet.fingers)
+    }
+
+    @Test
+    fun twoFingerHorizontalScrollStillSendsScrollPacket() {
+        engine.onPointerDown(2, 100f, 100f, 0L)
+        engine.onPointerMove(2, 160f, 100f)
+        engine.flushPendingMotionForTest()
+
+        assertEquals(1, sender.packets.size)
+        assertEquals(Protocol.PacketKind.Scroll, sender.packets.first().kind)
+        assertTrue(sender.packets.none { it.kind == Protocol.PacketKind.Gesture })
+    }
+
+    @Test
+    fun staggeredFingerLiftStillSendsFourFingerGesture() {
+        engine.onPointerDown(4, 200f, 100f, 0L)
+        engine.onPointerMove(4, 100f, 100f)
+        engine.onPointerUp(3, 100f, 100f, 100L)
+        engine.onPointerUp(2, 100f, 100f, 120L)
+        engine.onPointerUp(1, 100f, 100f, 140L)
+        engine.onPointerUp(0, 100f, 100f, 160L)
+
+        assertEquals(1, sender.packets.size)
+        val packet = sender.packets.first()
+        assertEquals(Protocol.PacketKind.Gesture, packet.kind)
+        assertEquals(Protocol.GestureKind.SwipeLeft, packet.gestureKind)
+        assertEquals(4.toByte(), packet.fingers)
+    }
+
+    @Test
+    fun fourFingerSwipeDownUsesSessionFingerCount() {
+        engine.onPointerDown(4, 100f, 100f, 0L)
+        engine.onPointerMove(4, 100f, 200f)
+        engine.onPointerUp(3, 100f, 200f, 100L)
+        engine.onPointerUp(0, 100f, 200f, 160L)
+
+        assertEquals(1, sender.packets.size)
+        val packet = sender.packets.first()
+        assertEquals(Protocol.GestureKind.SwipeDown, packet.gestureKind)
+        assertEquals(4.toByte(), packet.fingers)
+    }
+
+    @Test
+    fun shortThreeFingerSwipeDoesNotSendGesture() {
+        engine.onPointerDown(3, 100f, 100f, 0L)
+        engine.onPointerUp(0, 120f, 110f, 120L)
+        assertTrue(sender.packets.isEmpty())
+    }
+
     private class RecordingInputSender : InputSender() {
         val packets = mutableListOf<Protocol.InputPacket>()
 

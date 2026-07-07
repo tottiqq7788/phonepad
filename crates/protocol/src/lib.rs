@@ -18,6 +18,7 @@ pub enum PacketKind {
     Button = 4,
     Ping = 5,
     Pong = 6,
+    Gesture = 7,
 }
 
 impl TryFrom<u8> for PacketKind {
@@ -31,6 +32,7 @@ impl TryFrom<u8> for PacketKind {
             4 => Ok(Self::Button),
             5 => Ok(Self::Ping),
             6 => Ok(Self::Pong),
+            7 => Ok(Self::Gesture),
             _ => Err(ProtocolError::UnknownKind(value)),
         }
     }
@@ -79,6 +81,54 @@ impl TryFrom<u8> for ButtonAction {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum GestureKind {
+    SwipeLeft = 1,
+    SwipeRight = 2,
+    SwipeUp = 3,
+    SwipeDown = 4,
+    Pinch = 5,
+}
+
+impl TryFrom<u8> for GestureKind {
+    type Error = ProtocolError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::SwipeLeft),
+            2 => Ok(Self::SwipeRight),
+            3 => Ok(Self::SwipeUp),
+            4 => Ok(Self::SwipeDown),
+            5 => Ok(Self::Pinch),
+            _ => Err(ProtocolError::UnknownGestureKind(value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum GesturePhase {
+    Begin = 1,
+    Update = 2,
+    End = 3,
+    Cancel = 4,
+}
+
+impl TryFrom<u8> for GesturePhase {
+    type Error = ProtocolError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Begin),
+            2 => Ok(Self::Update),
+            3 => Ok(Self::End),
+            4 => Ok(Self::Cancel),
+            _ => Err(ProtocolError::UnknownGesturePhase(value)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputPacket {
     pub kind: PacketKind,
     pub sequence: u32,
@@ -87,6 +137,8 @@ pub struct InputPacket {
     pub y: i16,
     pub button: Option<MouseButton>,
     pub action: Option<ButtonAction>,
+    pub gesture_kind: Option<GestureKind>,
+    pub gesture_phase: Option<GesturePhase>,
     pub fingers: u8,
     pub auth_token: u64,
 }
@@ -99,6 +151,8 @@ pub enum ProtocolError {
     UnknownKind(u8),
     UnknownButton(u8),
     UnknownButtonAction(u8),
+    UnknownGestureKind(u8),
+    UnknownGesturePhase(u8),
 }
 
 impl InputPacket {
@@ -119,6 +173,8 @@ impl InputPacket {
             y,
             button: None,
             action: None,
+            gesture_kind: None,
+            gesture_phase: None,
             fingers,
             auth_token,
         }
@@ -138,6 +194,8 @@ impl InputPacket {
             y: 0,
             button: Some(button),
             action: Some(ButtonAction::Click),
+            gesture_kind: None,
+            gesture_phase: None,
             fingers: 0,
             auth_token,
         }
@@ -158,7 +216,33 @@ impl InputPacket {
             y: 0,
             button: Some(button),
             action: Some(action),
+            gesture_kind: None,
+            gesture_phase: None,
             fingers: 0,
+            auth_token,
+        }
+    }
+
+    pub fn gesture(
+        sequence: u32,
+        timestamp_micros: u64,
+        gesture_kind: GestureKind,
+        gesture_phase: GesturePhase,
+        fingers: u8,
+        auth_token: u64,
+        amount: i16,
+    ) -> Self {
+        Self {
+            kind: PacketKind::Gesture,
+            sequence,
+            timestamp_micros,
+            x: amount,
+            y: 0,
+            button: None,
+            action: None,
+            gesture_kind: Some(gesture_kind),
+            gesture_phase: Some(gesture_phase),
+            fingers,
             auth_token,
         }
     }
@@ -172,8 +256,14 @@ impl InputPacket {
         out[8..16].copy_from_slice(&self.timestamp_micros.to_le_bytes());
         out[16..18].copy_from_slice(&self.x.to_le_bytes());
         out[18..20].copy_from_slice(&self.y.to_le_bytes());
-        out[20] = self.button.map(|button| button as u8).unwrap_or(0);
-        out[21] = self.action.map(|action| action as u8).unwrap_or(0);
+        out[20] = match self.kind {
+            PacketKind::Gesture => self.gesture_kind.map(|value| value as u8).unwrap_or(0),
+            _ => self.button.map(|button| button as u8).unwrap_or(0),
+        };
+        out[21] = match self.kind {
+            PacketKind::Gesture => self.gesture_phase.map(|value| value as u8).unwrap_or(0),
+            _ => self.action.map(|action| action as u8).unwrap_or(0),
+        };
         out[22] = self.fingers;
         out[24..32].copy_from_slice(&self.auth_token.to_le_bytes());
         out
@@ -195,15 +285,30 @@ impl InputPacket {
         let timestamp_micros = u64::from_le_bytes(input[8..16].try_into().unwrap());
         let x = i16::from_le_bytes(input[16..18].try_into().unwrap());
         let y = i16::from_le_bytes(input[18..20].try_into().unwrap());
-        let button = if input[20] == 0 {
-            None
+        let (button, action, gesture_kind, gesture_phase) = if kind == PacketKind::Gesture {
+            let gesture_kind = if input[20] == 0 {
+                None
+            } else {
+                Some(GestureKind::try_from(input[20])?)
+            };
+            let gesture_phase = if input[21] == 0 {
+                None
+            } else {
+                Some(GesturePhase::try_from(input[21])?)
+            };
+            (None, None, gesture_kind, gesture_phase)
         } else {
-            Some(MouseButton::try_from(input[20])?)
-        };
-        let action = if input[21] == 0 {
-            None
-        } else {
-            Some(ButtonAction::try_from(input[21])?)
+            let button = if input[20] == 0 {
+                None
+            } else {
+                Some(MouseButton::try_from(input[20])?)
+            };
+            let action = if input[21] == 0 {
+                None
+            } else {
+                Some(ButtonAction::try_from(input[21])?)
+            };
+            (button, action, None, None)
         };
         let auth_token = u64::from_le_bytes(input[24..32].try_into().unwrap());
 
@@ -215,6 +320,8 @@ impl InputPacket {
             y,
             button,
             action,
+            gesture_kind,
+            gesture_phase,
             fingers: input[22],
             auth_token,
         })
@@ -315,6 +422,24 @@ mod tests {
         let packet = InputPacket::movement(PacketKind::Move, 42, 123_456, -7, 9, 1, token);
         assert_eq!(packet.encode()[0..4], [0x54, 0x50, 0x02, 0x01]);
         assert_eq!(packet.encode()[24..32], token.to_le_bytes());
+    }
+
+    #[test]
+    fn round_trips_gesture_packet() {
+        let token = auth_token("secret123", 44);
+        let packet = InputPacket::gesture(
+            44,
+            123_456,
+            GestureKind::SwipeDown,
+            GesturePhase::End,
+            3,
+            token,
+            0,
+        );
+        let decoded = InputPacket::decode(&packet.encode()).unwrap();
+        assert_eq!(decoded, packet);
+        assert_eq!(decoded.gesture_kind, Some(GestureKind::SwipeDown));
+        assert_eq!(decoded.gesture_phase, Some(GesturePhase::End));
     }
 
     #[test]

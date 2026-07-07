@@ -19,6 +19,7 @@ object Protocol {
         Button(4),
         Ping(5),
         Pong(6),
+        Gesture(7),
     }
 
     enum class MouseButton(val code: Byte) {
@@ -33,6 +34,21 @@ object Protocol {
         Click(3),
     }
 
+    enum class GestureKind(val code: Byte) {
+        SwipeLeft(1),
+        SwipeRight(2),
+        SwipeUp(3),
+        SwipeDown(4),
+        Pinch(5),
+    }
+
+    enum class GesturePhase(val code: Byte) {
+        Begin(1),
+        Update(2),
+        End(3),
+        Cancel(4),
+    }
+
     data class InputPacket(
         val kind: PacketKind,
         val sequence: Int,
@@ -41,6 +57,8 @@ object Protocol {
         val y: Short = 0,
         val button: MouseButton? = null,
         val action: ButtonAction? = null,
+        val gestureKind: GestureKind? = null,
+        val gesturePhase: GesturePhase? = null,
         val fingers: Byte = 0,
         val authToken: Long = 0L,
     ) {
@@ -54,8 +72,13 @@ object Protocol {
             buffer.putLong(timestampMicros)
             buffer.putShort(x)
             buffer.putShort(y)
-            buffer.put(button?.code ?: 0)
-            buffer.put(action?.code ?: 0)
+            if (kind == PacketKind.Gesture) {
+                buffer.put(gestureKind?.code ?: 0)
+                buffer.put(gesturePhase?.code ?: 0)
+            } else {
+                buffer.put(button?.code ?: 0)
+                buffer.put(action?.code ?: 0)
+            }
             buffer.put(fingers)
             buffer.put(0)
             buffer.putLong(authToken)
@@ -112,6 +135,27 @@ object Protocol {
                     timestampMicros = timestampMicros,
                     button = button,
                     action = ButtonAction.Click,
+                    authToken = authToken,
+                )
+            }
+
+            fun gesture(
+                sequence: Int,
+                timestampMicros: Long,
+                gestureKind: GestureKind,
+                gesturePhase: GesturePhase,
+                fingers: Int,
+                authToken: Long,
+                amount: Int = 0,
+            ): InputPacket {
+                return InputPacket(
+                    kind = PacketKind.Gesture,
+                    sequence = sequence,
+                    timestampMicros = timestampMicros,
+                    x = amount.coerceIn(-32768, 32767).toShort(),
+                    gestureKind = gestureKind,
+                    gesturePhase = gesturePhase,
+                    fingers = fingers.toByte(),
                     authToken = authToken,
                 )
             }

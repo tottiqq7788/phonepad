@@ -13,6 +13,7 @@ type ReceiverStatus = {
   movePackets: number;
   scrollPackets: number;
   clickPackets: number;
+  gesturePackets: number;
   lastClient?: string;
   lastRttMs?: number;
   deviceId?: string;
@@ -41,19 +42,28 @@ type Settings = {
   sensitivity: number;
   acceleration: number;
   scrollSensitivity: number;
+  gestureEnabled: boolean;
+  pinchZoomEnabled: boolean;
+  gestureSensitivity: number;
 };
 
 type PreferencesInfo = {
   downloadDir: string;
   defaultDownloadDir: string;
+  screenshotDir: string;
+  defaultScreenshotDir: string;
   openFolderAfterTransfer: boolean;
   usingDefaultDownloadDir: boolean;
+  usingDefaultScreenshotDir: boolean;
 };
 
 const defaultSettings: Settings = {
   sensitivity: 1.0,
   acceleration: 0.18,
   scrollSensitivity: 1.0,
+  gestureEnabled: true,
+  pinchZoomEnabled: false,
+  gestureSensitivity: 1.0,
 };
 
 export default function App() {
@@ -66,11 +76,13 @@ export default function App() {
   const [preferences, setPreferences] = useState<PreferencesInfo | null>(null);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [helpMessage, setHelpMessage] = useState<string | null>(null);
+  const [screenshotMessage, setScreenshotMessage] = useState<string | null>(null);
+  const [screenshotDirDraft, setScreenshotDirDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
 
   const packetRate = useMemo(() => {
     if (!status) return 0;
-    return status.movePackets + status.scrollPackets + status.clickPackets;
+    return status.movePackets + status.scrollPackets + status.clickPackets + (status.gesturePackets ?? 0);
   }, [status]);
 
   async function refreshStatus() {
@@ -163,6 +175,7 @@ export default function App() {
   async function refreshPreferences() {
     const next = await invoke<PreferencesInfo>("preferences_info");
     setPreferences(next);
+    setScreenshotDirDraft(next.screenshotDir);
   }
 
   async function pickDownloadDir() {
@@ -180,6 +193,45 @@ export default function App() {
     try {
       const next = await invoke<PreferencesInfo>("reset_download_dir");
       setPreferences(next);
+      setScreenshotDirDraft(next.screenshotDir);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function pickScreenshotDir() {
+    setError(null);
+    try {
+      const next = await invoke<PreferencesInfo>("pick_screenshot_dir");
+      setPreferences(next);
+      setScreenshotDirDraft(next.screenshotDir);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function resetScreenshotDir() {
+    setError(null);
+    try {
+      const next = await invoke<PreferencesInfo>("reset_screenshot_dir");
+      setPreferences(next);
+      setScreenshotDirDraft(next.screenshotDir);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function saveScreenshotDir() {
+    if (!preferences) return;
+    setError(null);
+    try {
+      const next = await invoke<PreferencesInfo>("update_preferences", {
+        downloadDir: preferences.usingDefaultDownloadDir ? null : preferences.downloadDir,
+        screenshotDir: screenshotDirDraft.trim() || null,
+        openFolderAfterTransfer: preferences.openFolderAfterTransfer,
+      });
+      setPreferences(next);
+      setScreenshotDirDraft(next.screenshotDir);
     } catch (err) {
       setError(String(err));
     }
@@ -191,6 +243,7 @@ export default function App() {
     try {
       const next = await invoke<PreferencesInfo>("update_preferences", {
         downloadDir: preferences.usingDefaultDownloadDir ? null : preferences.downloadDir,
+        screenshotDir: preferences.usingDefaultScreenshotDir ? null : preferences.screenshotDir,
         openFolderAfterTransfer: !preferences.openFolderAfterTransfer,
       });
       setPreferences(next);
@@ -225,11 +278,23 @@ export default function App() {
       unlistenError = fn;
     });
 
+    let unlistenScreenshot: (() => void) | undefined;
+    listen<{ ok: boolean; path?: string; error?: string }>("receiver://screenshot", (event) => {
+      if (event.payload.ok && event.payload.path) {
+        setScreenshotMessage(`截图已保存：${event.payload.path}`);
+      } else if (event.payload.error) {
+        setScreenshotMessage(`截图失败：${event.payload.error}`);
+      }
+    }).then((fn) => {
+      unlistenScreenshot = fn;
+    });
+
     return () => {
       window.clearInterval(timer);
       unlisten?.();
       unlistenHelp?.();
       unlistenError?.();
+      unlistenScreenshot?.();
     };
   }, []);
 
@@ -264,6 +329,7 @@ export default function App() {
 
       {error ? <div className="error">{error}</div> : null}
       {helpMessage ? <div className="notice">{helpMessage}</div> : null}
+      {screenshotMessage ? <div className="notice">{screenshotMessage}</div> : null}
 
       <section className="console-grid">
         <article className="panel">
@@ -333,7 +399,83 @@ export default function App() {
             <dd>{status?.scrollPackets ?? 0}</dd>
             <dt>点击</dt>
             <dd>{status?.clickPackets ?? 0}</dd>
+            <dt>手势</dt>
+            <dd>{status?.gesturePackets ?? 0}</dd>
           </dl>
+        </article>
+
+        <article className="panel">
+          <h2>手势设置</h2>
+          <p className="panel__desc">
+            三指/四指滑动映射为系统快捷键；三指下滑触发全屏截图。
+          </p>
+          <label className="toggle-field">
+            <span>启用手势</span>
+            <button
+              type="button"
+              className={`btn ${settings.gestureEnabled ? "btn--primary" : ""}`}
+              onClick={() => updateSettings({ ...settings, gestureEnabled: !settings.gestureEnabled })}
+            >
+              {settings.gestureEnabled ? "已开启" : "已关闭"}
+            </button>
+          </label>
+          <label className="toggle-field">
+            <span>双指捏合缩放（Android 端即将支持）</span>
+            <button
+              type="button"
+              className={`btn ${settings.pinchZoomEnabled ? "btn--primary" : ""}`}
+              onClick={() => updateSettings({ ...settings, pinchZoomEnabled: !settings.pinchZoomEnabled })}
+              disabled
+              title="需等待 Android 端发送捏合手势后生效"
+            >
+              {settings.pinchZoomEnabled ? "已开启" : "已关闭"}
+            </button>
+          </label>
+          <label className="slider-field">
+            捏合缩放灵敏度
+            <input
+              type="range"
+              min="0.3"
+              max="3"
+              step="0.05"
+              value={settings.gestureSensitivity}
+              onChange={(event) =>
+                updateSettings({ ...settings, gestureSensitivity: Number(event.target.value) })
+              }
+            />
+            <span>{settings.gestureSensitivity.toFixed(2)}</span>
+          </label>
+          <dl className="meta-grid">
+            <dt>截图保存位置</dt>
+            <dd>{preferences?.screenshotDir ?? "加载中…"}</dd>
+            <dt>默认位置</dt>
+            <dd>{preferences?.defaultScreenshotDir ?? "—"}</dd>
+          </dl>
+          <div className="device-name-inline">
+            <input
+              type="text"
+              className="device-name-input"
+              value={screenshotDirDraft}
+              placeholder="截图保存目录"
+              onChange={(event) => setScreenshotDirDraft(event.target.value)}
+            />
+            <button type="button" className="btn btn--primary btn--compact" onClick={saveScreenshotDir}>
+              保存
+            </button>
+          </div>
+          <div className="device-name-inline">
+            <button type="button" className="btn btn--primary btn--compact" onClick={pickScreenshotDir}>
+              选择目录
+            </button>
+            <button
+              type="button"
+              className="btn btn--compact"
+              onClick={resetScreenshotDir}
+              disabled={preferences?.usingDefaultScreenshotDir}
+            >
+              恢复默认
+            </button>
+          </div>
         </article>
 
         <article className="panel">

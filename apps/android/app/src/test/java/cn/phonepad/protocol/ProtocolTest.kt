@@ -37,4 +37,23 @@ class ProtocolTest {
     fun discoveryRequestMatchesDesktopProtocol() {
         assertEquals("PHONEPAD_DISCOVER_V1", String(Protocol.DISCOVERY_REQUEST))
     }
+
+    @Test
+    fun gesturePacketEncodesKindAndPhase() {
+        val token = Protocol.authToken("secret123", 44)
+        val packet = Protocol.InputPacket.gesture(
+            sequence = 44,
+            timestampMicros = 123_456L,
+            gestureKind = Protocol.GestureKind.SwipeDown,
+            gesturePhase = Protocol.GesturePhase.End,
+            fingers = 3,
+            authToken = token,
+            amount = 90,
+        )
+        val bytes = packet.encode()
+        assertEquals(Protocol.PacketKind.Gesture.code, bytes[3])
+        assertEquals(Protocol.GestureKind.SwipeDown.code, bytes[20])
+        assertEquals(Protocol.GesturePhase.End.code, bytes[21])
+        assertEquals(3.toByte(), bytes[22])
+    }
 }

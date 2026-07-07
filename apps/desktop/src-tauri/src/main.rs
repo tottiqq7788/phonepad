@@ -3,6 +3,7 @@
 
 mod device_config;
 mod file_transfer;
+mod gesture;
 mod input;
 mod logging;
 mod notify;
@@ -10,6 +11,7 @@ mod pairing;
 mod platform;
 mod preferences;
 mod receiver;
+mod screenshot;
 mod settings;
 mod state;
 mod tray;
@@ -54,8 +56,11 @@ fn preferences_path(app: &tauri::AppHandle) -> PathBuf {
 struct PreferencesInfo {
     download_dir: String,
     default_download_dir: String,
+    screenshot_dir: String,
+    default_screenshot_dir: String,
     open_folder_after_transfer: bool,
     using_default_download_dir: bool,
+    using_default_screenshot_dir: bool,
 }
 
 #[tauri::command]
@@ -159,15 +164,21 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
 }
 
 fn build_preferences_info(state: &AppState) -> PreferencesInfo {
-    let default_dir = platform::default_download_dir()
+    let default_download_dir = platform::default_download_dir()
         .unwrap_or_else(|| state.config_dir().join("downloads"));
+    let default_screenshot_dir = platform::default_screenshot_dir()
+        .unwrap_or_else(|| state.config_dir().join("screenshots"));
     let preferences = state.preferences.lock().unwrap().clone();
-    let resolved = preferences.resolved_download_dir(&default_dir);
+    let resolved_download = preferences.resolved_download_dir(&default_download_dir);
+    let resolved_screenshot = preferences.resolved_screenshot_dir(&default_screenshot_dir);
     PreferencesInfo {
-        download_dir: resolved.to_string_lossy().to_string(),
-        default_download_dir: default_dir.to_string_lossy().to_string(),
+        download_dir: resolved_download.to_string_lossy().to_string(),
+        default_download_dir: default_download_dir.to_string_lossy().to_string(),
+        screenshot_dir: resolved_screenshot.to_string_lossy().to_string(),
+        default_screenshot_dir: default_screenshot_dir.to_string_lossy().to_string(),
         open_folder_after_transfer: preferences.open_folder_after_transfer,
         using_default_download_dir: preferences.download_dir.is_none(),
+        using_default_screenshot_dir: preferences.screenshot_dir.is_none(),
     }
 }
 
@@ -180,11 +191,15 @@ fn preferences_info(state: State<'_, AppState>) -> PreferencesInfo {
 fn update_preferences(
     state: State<'_, AppState>,
     download_dir: Option<String>,
+    screenshot_dir: Option<String>,
     open_folder_after_transfer: bool,
 ) -> Result<PreferencesInfo, String> {
     {
         let mut preferences = state.preferences.lock().unwrap();
         preferences.download_dir = download_dir
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        preferences.screenshot_dir = screenshot_dir
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         preferences.open_folder_after_transfer = open_folder_after_transfer;
@@ -195,12 +210,13 @@ fn update_preferences(
 
 #[tauri::command]
 fn pick_download_dir(state: State<'_, AppState>) -> Result<PreferencesInfo, String> {
-    let open_folder = state.preferences.lock().unwrap().open_folder_after_transfer;
+    let prefs = state.preferences.lock().unwrap().clone();
     let picked = platform::pick_folder_dialog().ok_or_else(|| "未选择目录".to_string())?;
     {
         let mut preferences = state.preferences.lock().unwrap();
         preferences.download_dir = Some(picked.to_string_lossy().to_string());
-        preferences.open_folder_after_transfer = open_folder;
+        preferences.screenshot_dir = prefs.screenshot_dir;
+        preferences.open_folder_after_transfer = prefs.open_folder_after_transfer;
         preferences.save(&state.preferences_path)?;
     }
     Ok(build_preferences_info(&state))
@@ -208,11 +224,39 @@ fn pick_download_dir(state: State<'_, AppState>) -> Result<PreferencesInfo, Stri
 
 #[tauri::command]
 fn reset_download_dir(state: State<'_, AppState>) -> Result<PreferencesInfo, String> {
-    let open_folder = state.preferences.lock().unwrap().open_folder_after_transfer;
+    let prefs = state.preferences.lock().unwrap().clone();
     {
         let mut preferences = state.preferences.lock().unwrap();
         preferences.download_dir = None;
-        preferences.open_folder_after_transfer = open_folder;
+        preferences.screenshot_dir = prefs.screenshot_dir;
+        preferences.open_folder_after_transfer = prefs.open_folder_after_transfer;
+        preferences.save(&state.preferences_path)?;
+    }
+    Ok(build_preferences_info(&state))
+}
+
+#[tauri::command]
+fn pick_screenshot_dir(state: State<'_, AppState>) -> Result<PreferencesInfo, String> {
+    let prefs = state.preferences.lock().unwrap().clone();
+    let picked = platform::pick_folder_dialog().ok_or_else(|| "未选择目录".to_string())?;
+    {
+        let mut preferences = state.preferences.lock().unwrap();
+        preferences.screenshot_dir = Some(picked.to_string_lossy().to_string());
+        preferences.download_dir = prefs.download_dir;
+        preferences.open_folder_after_transfer = prefs.open_folder_after_transfer;
+        preferences.save(&state.preferences_path)?;
+    }
+    Ok(build_preferences_info(&state))
+}
+
+#[tauri::command]
+fn reset_screenshot_dir(state: State<'_, AppState>) -> Result<PreferencesInfo, String> {
+    let prefs = state.preferences.lock().unwrap().clone();
+    {
+        let mut preferences = state.preferences.lock().unwrap();
+        preferences.screenshot_dir = None;
+        preferences.download_dir = prefs.download_dir;
+        preferences.open_folder_after_transfer = prefs.open_folder_after_transfer;
         preferences.save(&state.preferences_path)?;
     }
     Ok(build_preferences_info(&state))
@@ -318,6 +362,8 @@ fn main() {
             update_preferences,
             pick_download_dir,
             reset_download_dir,
+            pick_screenshot_dir,
+            reset_screenshot_dir,
         ])
         .build(tauri::generate_context!())
         .expect("failed to run PhonePad Receiver")

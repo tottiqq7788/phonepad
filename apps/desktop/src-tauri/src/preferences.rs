@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct AppPreferences {
     pub download_dir: Option<String>,
+    pub screenshot_dir: Option<String>,
     #[serde(default = "default_open_folder")]
     pub open_folder_after_transfer: bool,
 }
@@ -18,6 +19,7 @@ impl Default for AppPreferences {
     fn default() -> Self {
         Self {
             download_dir: None,
+            screenshot_dir: None,
             open_folder_after_transfer: true,
         }
     }
@@ -71,6 +73,14 @@ impl AppPreferences {
 
     pub fn resolved_download_dir(&self, fallback: &Path) -> PathBuf {
         self.download_dir
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| fallback.to_path_buf())
+    }
+
+    pub fn resolved_screenshot_dir(&self, fallback: &Path) -> PathBuf {
+        self.screenshot_dir
             .as_ref()
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from)

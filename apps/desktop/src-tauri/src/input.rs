@@ -1,9 +1,15 @@
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
-use phonepad_protocol::{ButtonAction, MouseButton};
+use phonepad_protocol::{ButtonAction, GestureKind, GesturePhase, MouseButton};
+use std::path::Path;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
+use crate::gesture::{
+    detect_platform, map_gesture, map_pinch, pinch_zoom_keys, DesktopPlatform, GestureAction,
+    PinchDirection,
+};
+use crate::screenshot::capture_fullscreen_to;
 use crate::settings::ReceiverSettings;
 
 static MODIFIER_TRACKER: Mutex<ModifierTracker> = Mutex::new(ModifierTracker {
@@ -50,6 +56,8 @@ pub struct InputController {
     enigo: Enigo,
     scroll_remainder_x: f64,
     scroll_remainder_y: f64,
+    pinch_remainder: f64,
+    platform: DesktopPlatform,
 }
 
 impl InputController {
@@ -59,6 +67,8 @@ impl InputController {
             enigo,
             scroll_remainder_x: 0.0,
             scroll_remainder_y: 0.0,
+            pinch_remainder: 0.0,
+            platform: detect_platform(),
         })
     }
 
@@ -141,6 +151,152 @@ impl InputController {
             tracker.apply(key, direction);
         }
         self.enigo.key(key, direction).map_err(|err| err.to_string())
+    }
+
+    pub fn handle_gesture(
+        &mut self,
+        kind: GestureKind,
+        phase: GesturePhase,
+        fingers: u8,
+        amount: i16,
+        settings: &ReceiverSettings,
+        screenshot_dir: &Path,
+    ) -> Result<GestureOutcome, String> {
+        if !settings.gesture_enabled {
+            return Ok(GestureOutcome::Ignored);
+        }
+
+        if kind == GestureKind::Pinch {
+            if !settings.pinch_zoom_enabled {
+                return Ok(GestureOutcome::Ignored);
+            }
+            return self.handle_pinch(phase, amount, settings.gesture_sensitivity);
+        }
+
+        let action = match map_gesture(kind, fingers, phase, self.platform) {
+            Some(action) => action,
+            None => return Ok(GestureOutcome::Ignored),
+        };
+
+        match action {
+            GestureAction::Chord(keys) => {
+                press_chord(&mut self.enigo, &keys)?;
+                Ok(GestureOutcome::Executed)
+            }
+            GestureAction::Screenshot => {
+                match capture_fullscreen_to(screenshot_dir) {
+                    Ok(path) => Ok(GestureOutcome::ScreenshotSaved(path)),
+                    Err(error) => Ok(GestureOutcome::ScreenshotFailed(error)),
+                }
+            }
+            GestureAction::ShowDesktop => {
+                trigger_show_desktop(self.platform, &mut self.enigo)?;
+                Ok(GestureOutcome::Executed)
+            }
+            GestureAction::PinchZoom { direction } => {
+                self.execute_pinch_zoom(direction)?;
+                Ok(GestureOutcome::Executed)
+            }
+        }
+    }
+
+    fn handle_pinch(
+        &mut self,
+        phase: GesturePhase,
+        amount: i16,
+        sensitivity: f64,
+    ) -> Result<GestureOutcome, String> {
+        if matches!(phase, GesturePhase::Cancel) {
+            self.pinch_remainder = 0.0;
+            return Ok(GestureOutcome::Ignored);
+        }
+
+        self.pinch_remainder += f64::from(amount);
+        let quantized = self.pinch_remainder.round() as i16;
+        if let Some(direction) = map_pinch(quantized, sensitivity) {
+            self.pinch_remainder -= f64::from(quantized);
+            self.execute_pinch_zoom(direction)?;
+            return Ok(GestureOutcome::Executed);
+        }
+
+        if matches!(phase, GesturePhase::End) {
+            self.pinch_remainder = 0.0;
+        }
+        Ok(GestureOutcome::Ignored)
+    }
+
+    fn execute_pinch_zoom(&mut self, direction: PinchDirection) -> Result<(), String> {
+        match self.platform {
+            DesktopPlatform::MacOs => {
+                let keys = pinch_zoom_keys(self.platform, direction);
+                press_chord(&mut self.enigo, &keys)
+            }
+            _ => {
+                let keys = pinch_zoom_keys(self.platform, direction);
+                for key in &keys {
+                    self.enigo
+                        .key(*key, Direction::Press)
+                        .map_err(|err| err.to_string())?;
+                }
+                let wheel = match direction {
+                    PinchDirection::In => -1,
+                    PinchDirection::Out => 1,
+                };
+                self.enigo
+                    .scroll(wheel, Axis::Vertical)
+                    .map_err(|err| err.to_string())?;
+                for key in keys.iter().rev() {
+                    self.enigo
+                        .key(*key, Direction::Release)
+                        .map_err(|err| err.to_string())?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GestureOutcome {
+    Ignored,
+    Executed,
+    ScreenshotSaved(std::path::PathBuf),
+    ScreenshotFailed(String),
+}
+
+fn press_chord(enigo: &mut Enigo, keys: &[Key]) -> Result<(), String> {
+    for key in keys {
+        enigo
+            .key(*key, Direction::Press)
+            .map_err(|err| err.to_string())?;
+    }
+    thread::sleep(Duration::from_millis(16));
+    for key in keys.iter().rev() {
+        enigo
+            .key(*key, Direction::Release)
+            .map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+fn trigger_show_desktop(platform: DesktopPlatform, enigo: &mut Enigo) -> Result<(), String> {
+    match platform {
+        DesktopPlatform::MacOs => {
+            let output = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    r#"tell application "System Events" to key code 103"#,
+                ])
+                .output()
+                .map_err(|err| err.to_string())?;
+            if output.status.success() {
+                Ok(())
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(format!("macOS 显示桌面失败: {stderr}"))
+            }
+        }
+        _ => press_chord(enigo, &[Key::Meta, Key::D]),
     }
 }
 

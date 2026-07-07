@@ -20,7 +20,10 @@ use phonepad_protocol::{
 use crate::{
     device_config::DeviceConfig,
     file_transfer::{self, FileBeginResponse, FileCommitResponse, FileTransferManager},
-    input::{normalize_key_repeat, parse_key_action, parse_key_event, reset_modifier_tracker, InputController},
+    input::{
+        normalize_key_repeat, parse_key_action, parse_key_event, reset_modifier_tracker,
+        GestureOutcome, InputController,
+    },
     logging::{self, short_id},
     platform,
     preferences::AppPreferences,
@@ -45,6 +48,7 @@ pub struct ReceiverStatus {
     pub move_packets: u64,
     pub scroll_packets: u64,
     pub click_packets: u64,
+    pub gesture_packets: u64,
     pub last_client: Option<String>,
     pub last_rtt_ms: Option<f64>,
     pub device_id: String,
@@ -64,6 +68,7 @@ impl Default for ReceiverStatus {
             move_packets: 0,
             scroll_packets: 0,
             click_packets: 0,
+            gesture_packets: 0,
             last_client: None,
             last_rtt_ms: None,
             device_id: String::new(),
@@ -175,6 +180,7 @@ pub fn start(
         app.clone(),
         udp_socket,
         settings.clone(),
+        preferences.clone(),
         device.clone(),
         input.clone(),
         shutdown.clone(),
@@ -218,6 +224,7 @@ fn spawn_input_loop(
     app: AppHandle,
     socket: UdpSocket,
     settings: Arc<Mutex<ReceiverSettings>>,
+    preferences: Arc<Mutex<AppPreferences>>,
     device: Arc<Mutex<DeviceConfig>>,
     input: Arc<Mutex<InputController>>,
     shutdown: Arc<AtomicBool>,
@@ -302,11 +309,86 @@ fn spawn_input_loop(
                     PacketKind::Move => snapshot.move_packets += 1,
                     PacketKind::Scroll => snapshot.scroll_packets += 1,
                     PacketKind::Click | PacketKind::Button => snapshot.click_packets += 1,
+                    PacketKind::Gesture => snapshot.gesture_packets += 1,
                     _ => {}
                 }
             }
 
             let current_settings = settings.lock().unwrap().clone();
+            let screenshot_dir = {
+                let prefs = preferences.lock().unwrap();
+                let fallback = platform::default_screenshot_dir().unwrap_or_else(|| {
+                    app.state::<AppState>().config_dir().join("screenshots")
+                });
+                prefs.resolved_screenshot_dir(&fallback)
+            };
+
+            if packet.kind == PacketKind::Gesture {
+                let kind = match packet.gesture_kind {
+                    Some(kind) => kind,
+                    None => {
+                        status.lock().unwrap().packets_dropped += 1;
+                        continue;
+                    }
+                };
+                let phase = match packet.gesture_phase {
+                    Some(phase) => phase,
+                    None => {
+                        status.lock().unwrap().packets_dropped += 1;
+                        continue;
+                    }
+                };
+                let gesture_result = {
+                    let mut controller = match input.lock() {
+                        Ok(controller) => controller,
+                        Err(_) => {
+                            status.lock().unwrap().packets_dropped += 1;
+                            continue;
+                        }
+                    };
+                    controller.handle_gesture(
+                        kind,
+                        phase,
+                        packet.fingers,
+                        packet.x,
+                        &current_settings,
+                        &screenshot_dir,
+                    )
+                };
+                match gesture_result {
+                    Err(err) => {
+                        let _ = app.emit("receiver://error", err);
+                    }
+                    Ok(GestureOutcome::ScreenshotSaved(path)) => {
+                        logging::info(
+                            "gesture",
+                            "screenshot_saved",
+                            &format!("path={}", path.display()),
+                        );
+                        let _ = app.emit(
+                            "receiver://screenshot",
+                            serde_json::json!({
+                                "ok": true,
+                                "path": path.to_string_lossy(),
+                            }),
+                        );
+                    }
+                    Ok(GestureOutcome::ScreenshotFailed(error)) => {
+                        logging::error("gesture", "screenshot_failed", &format!("reason={error}"));
+                        let _ = app.emit(
+                            "receiver://screenshot",
+                            serde_json::json!({
+                                "ok": false,
+                                "error": error,
+                            }),
+                        );
+                        let _ = app.emit("receiver://error", format!("截图保存失败: {error}"));
+                    }
+                    Ok(_) => {}
+                }
+                continue;
+            }
+
             let result = {
                 let mut controller = match input.lock() {
                     Ok(controller) => controller,
@@ -996,5 +1078,50 @@ mod tests {
             nonce,
         );
         assert_eq!(response.auth, discover_response_auth(secret, nonce));
+    }
+
+    #[test]
+    fn gesture_packet_decode_does_not_break_move_packets() {
+        use phonepad_protocol::{GestureKind, GesturePhase};
+
+        let token = phonepad_protocol::auth_token("secret123", 50);
+        let move_packet = InputPacket::movement(PacketKind::Move, 50, 123_456, 3, -2, 1, token);
+        let gesture_packet = InputPacket::gesture(
+            51,
+            123_457,
+            GestureKind::SwipeUp,
+            GesturePhase::End,
+            3,
+            token,
+            80,
+        );
+        let decoded_move = InputPacket::decode(&move_packet.encode()).unwrap();
+        let decoded_gesture = InputPacket::decode(&gesture_packet.encode()).unwrap();
+        assert_eq!(decoded_move.kind, PacketKind::Move);
+        assert_eq!(decoded_gesture.kind, PacketKind::Gesture);
+        assert_eq!(decoded_gesture.gesture_kind, Some(GestureKind::SwipeUp));
+    }
+
+    #[test]
+    fn rejects_gesture_packet_without_phase() {
+        use phonepad_protocol::{GestureKind, GesturePhase};
+
+        let token = phonepad_protocol::auth_token("secret123", 52);
+        let mut bytes = InputPacket::gesture(
+            52,
+            123_458,
+            GestureKind::SwipeDown,
+            GesturePhase::End,
+            3,
+            token,
+            0,
+        )
+        .encode();
+        bytes[21] = 0;
+        let decoded = InputPacket::decode(&bytes).unwrap();
+        assert_eq!(decoded.kind, PacketKind::Gesture);
+        assert_eq!(decoded.gesture_phase, None);
+        assert_eq!(decoded.gesture_kind, Some(GestureKind::SwipeDown));
+        let _ = GesturePhase::End;
     }
 }

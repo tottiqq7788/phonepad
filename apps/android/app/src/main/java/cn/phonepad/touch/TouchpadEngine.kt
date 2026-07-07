@@ -21,6 +21,7 @@ class TouchpadEngine(
     private val haptics: HapticsManager,
     private val frameIntervalMs: Long = FRAME_INTERVAL_MS,
     private val enableScheduledFlush: Boolean = true,
+    private val gestureRecognizer: GestureRecognizer = GestureRecognizer(),
 ) {
     private var target: ReceiverTarget? = null
     private var pointerCount = 0
@@ -56,6 +57,7 @@ class TouchpadEngine(
     private var moveFracY = 0f
     private var scrollFracX = 0f
     private var scrollFracY = 0f
+    private var gestureTracking = false
 
     fun setTarget(target: ReceiverTarget?) {
         synchronized(this) {
@@ -63,6 +65,8 @@ class TouchpadEngine(
             if (target == null) {
                 resetMotionAccumulators()
                 stopFlushLoop()
+                gestureTracking = false
+                gestureRecognizer.cancel()
             }
         }
     }
@@ -99,15 +103,15 @@ class TouchpadEngine(
             lastSentX = 0f
             lastSentY = 0f
             moved = false
-            mode = when (count) {
-                1 -> Mode.OneFinger
-                2 -> Mode.TwoFinger
-                else -> Mode.MultiFinger
-            }
+            mode = modeForCount(count)
             if (mode == Mode.OneFinger || mode == Mode.TwoFinger) {
                 startFlushLoop()
             } else {
                 stopFlushLoop()
+            }
+            if (!gestureTracking && count >= 3) {
+                gestureTracking = true
+                gestureRecognizer.begin(count, x, y)
             }
         }
     }
@@ -116,6 +120,15 @@ class TouchpadEngine(
         synchronized(this) {
             if (target == null) return
             pointerCount = count
+
+            if (gestureTracking) {
+                val gesture = gestureRecognizer.update(x, y)
+                if (gesture != null) {
+                    moved = true
+                    sessionMoved = true
+                }
+                return
+            }
 
             when (mode) {
                 Mode.OneFinger -> {
@@ -157,9 +170,18 @@ class TouchpadEngine(
     fun onPointerUp(count: Int, x: Float, y: Float, eventTime: Long) {
         val host: ReceiverTarget?
         val tapAction: TapAction?
+        val gestureEvent: GestureEvent?
+        val gestureFingerCount: Int
         synchronized(this) {
             host = target
-            tapAction = if (count == 0 && host != null) {
+            gestureFingerCount = sessionMaxPointerCount
+            gestureEvent = if (count == 0 && gestureTracking) {
+                gestureTracking = false
+                gestureRecognizer.end(x, y)
+            } else {
+                null
+            }
+            tapAction = if (count == 0 && host != null && gestureEvent == null) {
                 val duration = eventTime - sessionDownTime
                 val distance = hypot(x - sessionDownX, y - sessionDownY)
                 when {
@@ -189,24 +211,25 @@ class TouchpadEngine(
                 moved = false
                 resetMotionAccumulators()
                 stopFlushLoop()
+                gestureRecognizer.cancel()
             } else {
-                mode = when (count) {
-                    1 -> Mode.OneFinger
-                    2 -> Mode.TwoFinger
-                    else -> Mode.MultiFinger
-                }
+                mode = modeForCount(count)
                 downX = x
                 downY = y
                 downTime = eventTime
                 lastSentX = 0f
                 lastSentY = 0f
                 moved = false
-                if (mode == Mode.OneFinger || mode == Mode.TwoFinger) {
+                if (!gestureTracking && (mode == Mode.OneFinger || mode == Mode.TwoFinger)) {
                     startFlushLoop()
-                } else {
+                } else if (!gestureTracking) {
                     stopFlushLoop()
                 }
             }
+        }
+
+        if (host != null && gestureEvent != null) {
+            sendGesture(host, gestureEvent, gestureFingerCount)
         }
 
         if (host != null && tapAction != null) {
@@ -238,6 +261,7 @@ class TouchpadEngine(
             flushMotionLocked()
             resetMotionAccumulators()
             stopFlushLoop()
+            gestureRecognizer.cancel()
             flushExecutor.shutdownNow()
         }
     }
@@ -246,6 +270,32 @@ class TouchpadEngine(
         synchronized(this) {
             flushMotionLocked()
         }
+    }
+
+    private fun sendGesture(host: ReceiverTarget, event: GestureEvent, fingerCount: Int) {
+        if (event.phase != Protocol.GesturePhase.End) return
+        sender.send(
+            host.host,
+            host.udpPort,
+            Protocol.InputPacket.gesture(
+                sequence = 0,
+                timestampMicros = wallMicros(),
+                gestureKind = event.kind,
+                gesturePhase = event.phase,
+                fingers = fingerCount,
+                authToken = 0L,
+                amount = event.amount,
+            ),
+        )
+        haptics.leftClick()
+    }
+
+    private fun modeForCount(count: Int): Mode = when (count) {
+        1 -> Mode.OneFinger
+        2 -> Mode.TwoFinger
+        3 -> Mode.ThreeFinger
+        4 -> Mode.FourFinger
+        else -> Mode.MultiFinger
     }
 
     private fun startFlushLoop() {
@@ -334,6 +384,8 @@ class TouchpadEngine(
         Idle,
         OneFinger,
         TwoFinger,
+        ThreeFinger,
+        FourFinger,
         MultiFinger,
     }
 
