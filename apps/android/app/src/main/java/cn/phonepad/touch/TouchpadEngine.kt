@@ -1,6 +1,7 @@
 package cn.phonepad.touch
 
 import cn.phonepad.haptics.HapticsManager
+import cn.phonepad.logging.PhonePadLogger
 import cn.phonepad.net.InputSender
 import cn.phonepad.protocol.Protocol
 import kotlin.math.hypot
@@ -167,14 +168,31 @@ class TouchpadEngine(
         }
     }
 
+    fun onPointerCancel() {
+        synchronized(this) {
+            flushMotionLocked()
+            gestureTracking = false
+            gestureRecognizer.cancel()
+            pointerCount = 0
+            mode = Mode.Idle
+            sessionMaxPointerCount = 0
+            sessionMoved = false
+            twoFingerTapEligible = false
+            moved = false
+            resetMotionAccumulators()
+            stopFlushLoop()
+        }
+    }
+
     fun onPointerUp(count: Int, x: Float, y: Float, eventTime: Long) {
         val host: ReceiverTarget?
         val tapAction: TapAction?
         val gestureEvent: GestureEvent?
-        val gestureFingerCount: Int
         synchronized(this) {
             host = target
-            gestureFingerCount = sessionMaxPointerCount
+            if (count in 1..2 && gestureTracking && gestureRecognizer.cancelIfBelowThreshold(x, y)) {
+                gestureTracking = false
+            }
             gestureEvent = if (count == 0 && gestureTracking) {
                 gestureTracking = false
                 gestureRecognizer.end(x, y)
@@ -229,7 +247,7 @@ class TouchpadEngine(
         }
 
         if (host != null && gestureEvent != null) {
-            sendGesture(host, gestureEvent, gestureFingerCount)
+            sendGesture(host, gestureEvent, gestureEvent.fingers)
         }
 
         if (host != null && tapAction != null) {
@@ -274,6 +292,11 @@ class TouchpadEngine(
 
     private fun sendGesture(host: ReceiverTarget, event: GestureEvent, fingerCount: Int) {
         if (event.phase != Protocol.GesturePhase.End) return
+        PhonePadLogger.i(
+            "touch",
+            "gesture_send",
+            "kind=${event.kind.name} fingers=$fingerCount amount=${event.amount} host=${host.host}",
+        )
         sender.send(
             host.host,
             host.udpPort,

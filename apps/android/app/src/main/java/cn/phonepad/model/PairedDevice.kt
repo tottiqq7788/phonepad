@@ -1,5 +1,7 @@
 package cn.phonepad.model
 
+import cn.phonepad.protocol.Protocol
+
 enum class DeviceOnlineState {
     Unknown,
     Online,
@@ -13,6 +15,7 @@ data class PairedDevice(
     val tcpPort: Int,
     val udpPort: Int,
     val secret: String,
+    val discoveryPort: Int = Protocol.UDP_DISCOVERY_PORT,
     val lastConnectedAt: Long = 0L,
     val onlineState: DeviceOnlineState = DeviceOnlineState.Unknown,
 )

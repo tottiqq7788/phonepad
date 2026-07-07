@@ -55,9 +55,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.changedToDown
-import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -134,6 +131,8 @@ fun PhonePadApp(connectionManager: ConnectionManager) {
             onKeyboardKey = connectionManager::sendKeyboardKeyToActiveDevice,
             onClearTextInputError = connectionManager::clearTextInputError,
             onAttachmentError = connectionManager::setTextInputError,
+            onSystemGestureConflict = connectionManager::onTouchSystemGestureConflict,
+            onClearGestureConflictHint = connectionManager::clearGestureConflictHint,
         )
     } else {
         DeviceHomeScreen(
@@ -395,6 +394,8 @@ private fun TouchpadScreen(
     onKeyboardKey: (String, String?) -> Unit,
     onClearTextInputError: () -> Unit,
     onAttachmentError: (String) -> Unit,
+    onSystemGestureConflict: () -> Unit,
+    onClearGestureConflictHint: () -> Unit,
 ) {
     var showHelp by remember { mutableStateOf(false) }
     var showTextInput by remember { mutableStateOf(false) }
@@ -466,51 +467,10 @@ private fun TouchpadScreen(
                     onKeyboardKey = onKeyboardKey,
                 )
             } else {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(Unit) {
-                            awaitPointerEventScope {
-                                while (true) {
-                                    val event = awaitPointerEvent(PointerEventPass.Main)
-                                    val pressed = event.changes.filter { it.pressed }
-                                    val count = pressed.size
-                                    val time = event.changes.firstOrNull()?.uptimeMillis ?: System.currentTimeMillis()
-
-                                    val downs = event.changes.count { it.changedToDown() }
-                                    val ups = event.changes.count { it.changedToUp() }
-                                    val prevCount = count + ups - downs
-
-                                    if (downs > 0 && ups > 0 && count == 0) {
-                                        val downChanges = event.changes.filter { it.changedToDown() }
-                                        val upChange = event.changes.first { it.changedToUp() }
-                                        val center = pressedCenter(downChanges)
-                                        engine.onPointerDown(downChanges.size, center.first, center.second, time)
-                                        engine.onPointerUp(0, upChange.position.x, upChange.position.y, time)
-                                    } else {
-                                        if (downs > 0 && count > 0 && (prevCount == 0 || count != prevCount)) {
-                                            val center = pressedCenter(pressed)
-                                            engine.onPointerDown(count, center.first, center.second, time)
-                                        }
-                                        if (ups > 0) {
-                                            val (upX, upY) = if (count > 0) {
-                                                val center = pressedCenter(pressed)
-                                                center.first to center.second
-                                            } else {
-                                                val upChange = event.changes.first { it.changedToUp() }
-                                                upChange.position.x to upChange.position.y
-                                            }
-                                            engine.onPointerUp(count, upX, upY, time)
-                                        } else if (count > 0 && downs == 0) {
-                                            val center = pressedCenter(pressed)
-                                            engine.onPointerMove(count, center.first, center.second)
-                                        }
-                                    }
-
-                                    event.changes.forEach { it.consume() }
-                                }
-                            }
-                        },
+                TouchpadSurface(
+                    engine = engine,
+                    modifier = Modifier.fillMaxSize(),
+                    onSystemGestureConflict = onSystemGestureConflict,
                 )
 
                 Text(
@@ -526,6 +486,13 @@ private fun TouchpadScreen(
 
                 if (showHelp) {
                     HelpOverlay(onDismiss = { showHelp = false })
+                }
+
+                state.gestureConflictHint?.let { hint ->
+                    GestureConflictBanner(
+                        message = hint,
+                        onDismiss = onClearGestureConflictHint,
+                    )
                 }
 
                 if (state.showDevicePicker) {
@@ -1206,7 +1173,44 @@ private fun HelpOverlay(onDismiss: () -> Unit) {
             HelpLine("单指点击", "左键单击")
             HelpLine("双指滑动", "滚动页面")
             HelpLine("双指点击", "右键单击")
+            HelpLine("三指上滑", "桌面任务视图")
+            HelpLine("三指下滑", "桌面截图保存")
+            HelpLine("四指左右滑", "切换虚拟桌面")
+            HelpLine("四指下滑", "显示桌面")
+            Text(
+                text = "若 OPPO/ColorOS 等系统三指手势（小布记忆/截图）仍抢占触控，请在系统设置中关闭对应手势。",
+                color = Warning,
+                fontSize = 12.sp,
+            )
             Text(text = "点击任意处关闭", color = TextMuted, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun GestureConflictBanner(message: String, onDismiss: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 48.dp),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(BgPanel.copy(alpha = 0.95f))
+                .border(1.dp, Warning.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                .clickable(onClick = onDismiss)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = message,
+                color = TextPrimary,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
@@ -1219,17 +1223,8 @@ private fun HelpLine(gesture: String, action: String) {
             text = action,
             color = TextPrimary,
             fontSize = 13.sp,
-            maxLines = 1,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
     }
-}
-
-private fun pressedCenter(
-    pressed: List<androidx.compose.ui.input.pointer.PointerInputChange>,
-): Pair<Float, Float> {
-    if (pressed.isEmpty()) return 0f to 0f
-    val x = pressed.map { it.position.x }.average().toFloat()
-    val y = pressed.map { it.position.y }.average().toFloat()
-    return x to y
 }

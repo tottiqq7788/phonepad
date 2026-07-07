@@ -66,6 +66,16 @@ class GestureRecognizer(
         fingerCount = 0
     }
 
+    fun cancelIfBelowThreshold(x: Float, y: Float): Boolean {
+        if (!tracking) return false
+        val distance = hypot(x - startX, y - startY)
+        if (distance < swipeMinDistance) {
+            cancel()
+            return true
+        }
+        return false
+    }
+
     internal fun classify(totalDx: Float, totalDy: Float): Protocol.GestureKind? {
         val absX = abs(totalDx)
         val absY = abs(totalDy)

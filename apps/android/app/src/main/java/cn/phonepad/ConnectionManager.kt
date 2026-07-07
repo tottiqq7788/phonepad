@@ -48,6 +48,7 @@ data class ConnectionUiState(
     val textInputError: String? = null,
     val transferSending: Boolean = false,
     val transferProgress: FileTransferProgress? = null,
+    val gestureConflictHint: String? = null,
 )
 
 class ConnectionManager(
@@ -75,6 +76,7 @@ class ConnectionManager(
     @Volatile
     private var transferCancelled = false
     private val keyboardSendMutex = Mutex()
+    private val onlineRefreshMutex = Mutex()
     private val heldModifiers = mutableSetOf<String>()
 
     companion object {
@@ -112,7 +114,20 @@ class ConnectionManager(
         onlineRefreshJob = scope.launch { refreshOnlineStatesInternal() }
     }
 
+    fun onTouchSystemGestureConflict() {
+        uiState = uiState.copy(
+            gestureConflictHint = "检测到系统手势介入（如小布记忆/三指截图）。请在系统设置中关闭对应手势，并确保 PhonePad 已连接桌面端。",
+        )
+    }
+
+    fun clearGestureConflictHint() {
+        if (uiState.gestureConflictHint != null) {
+            uiState = uiState.copy(gestureConflictHint = null)
+        }
+    }
+
     private suspend fun refreshOnlineStatesInternal() {
+        onlineRefreshMutex.withLock {
         val devices = store.load()
         if (devices.isEmpty()) {
             uiState = uiState.copy(pairedDevices = emptyList(), checkingOnline = false)
@@ -122,21 +137,68 @@ class ConnectionManager(
             uiState = uiState.copy(checkingOnline = true)
         }
         val states = linkedMapOf<String, DeviceOnlineState>()
+        val hostUpdates = linkedMapOf<String, PairedDevice>()
         devices.forEach { device ->
-            val status = controlClient.fetchStatus(
-                host = device.host,
+            var host = device.host
+            var tcpPort = device.tcpPort
+            var udpPort = device.udpPort
+            var name = device.name
+            var status = controlClient.fetchStatus(
+                host = host,
                 deviceId = device.id,
                 secret = device.secret,
-                port = device.tcpPort,
+                port = tcpPort,
             )
+            if (status?.running != true) {
+                val rediscovered = discoverDesktop(
+                    deviceId = device.id,
+                    secret = device.secret,
+                    discoveryPort = device.discoveryPort,
+                )
+                if (rediscovered != null) {
+                    host = rediscovered.host
+                    tcpPort = rediscovered.tcpPort
+                    udpPort = rediscovered.udpPort
+                    name = rediscovered.deviceName.ifBlank { device.name }
+                    PhonePadLogger.i(
+                        "connection",
+                        "rediscover_host",
+                        "device_id=${PhonePadLogger.shortId(device.id)} host=$host",
+                    )
+                    status = controlClient.fetchStatus(
+                        host = host,
+                        deviceId = device.id,
+                        secret = device.secret,
+                        port = tcpPort,
+                    )
+                    if (status?.running == true) {
+                        hostUpdates[device.id] = device.copy(
+                            host = host,
+                            tcpPort = tcpPort,
+                            udpPort = udpPort,
+                            name = name,
+                        )
+                    }
+                }
+            }
             states[device.id] = if (status?.running == true) {
                 DeviceOnlineState.Online
             } else {
                 DeviceOnlineState.Offline
             }
         }
-        val updated = store.updateOnlineStates(states)
+        var updated = store.updateOnlineStates(states)
+        if (hostUpdates.isNotEmpty()) {
+            val merged = updated.map { device ->
+                hostUpdates[device.id] ?: device
+            }
+            store.save(merged)
+            updated = merged.map { device ->
+                device.copy(onlineState = states[device.id] ?: device.onlineState)
+            }
+        }
         uiState = uiState.copy(pairedDevices = updated, checkingOnline = false)
+        }
     }
 
     fun pairFromScan(raw: String) {
@@ -178,6 +240,7 @@ class ConnectionManager(
                     tcpPort = device.tcpPort,
                     udpPort = device.udpPort,
                     secret = device.secret,
+                    discoveryPort = device.discoveryPort,
                 ),
                 fromScan = false,
                 generation = generation,
@@ -212,7 +275,12 @@ class ConnectionManager(
         releaseHeldKeyboardModifiers()
         touchpadEngine.setTarget(null)
         inputSender.setSecret("")
-        uiState = uiState.copy(error = null, showDevicePicker = false, connecting = true)
+        uiState = uiState.copy(
+            error = null,
+            showDevicePicker = false,
+            connecting = true,
+            connected = false,
+        )
         PhonePadLogger.i(
             "connection",
             "connect_attempt",
@@ -274,7 +342,7 @@ class ConnectionManager(
             uiState = uiState.copy(
                 connected = false,
                 connecting = false,
-                error = "无法连接到 ${payload.deviceName}，请确认桌面端已启动接收服务。",
+                error = "无法连接到 ${payload.deviceName}。请确认桌面端已启动接收服务；若电脑更换网络，请重新扫码或等待自动发现更新地址。",
             )
             haptics.disconnected()
             return
@@ -302,6 +370,7 @@ class ConnectionManager(
             tcpPort = resolved.tcpPort,
             udpPort = resolved.udpPort,
             secret = payload.secret,
+            discoveryPort = payload.discoveryPort,
             lastConnectedAt = System.currentTimeMillis(),
             onlineState = DeviceOnlineState.Online,
         )
@@ -718,7 +787,7 @@ class ConnectionManager(
                         val rediscovered = discoverDesktop(
                             deviceId = currentDevice.id,
                             secret = currentDevice.secret,
-                            discoveryPort = Protocol.UDP_DISCOVERY_PORT,
+                            discoveryPort = currentDevice.discoveryPort,
                         )
                         if (rediscovered != null) {
                             val hostChanged = rediscovered.host != currentDevice.host

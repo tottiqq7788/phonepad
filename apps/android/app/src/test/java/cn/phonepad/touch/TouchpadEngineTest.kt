@@ -259,6 +259,55 @@ class TouchpadEngineTest {
         assertTrue(sender.packets.isEmpty())
     }
 
+    @Test
+    fun threeFingerDropToTwoFingerAllowsScroll() {
+        engine.onPointerDown(3, 100f, 200f, 0L)
+        engine.onPointerUp(2, 100f, 200f, 80L)
+        engine.onPointerMove(2, 100f, 260f)
+        engine.flushPendingMotionForTest()
+
+        assertEquals(1, sender.packets.size)
+        assertEquals(Protocol.PacketKind.Scroll, sender.packets.first().kind)
+    }
+
+    @Test
+    fun accidentalFourthFingerStillReportsThreeFingerGesture() {
+        engine.onPointerDown(3, 100f, 200f, 0L)
+        engine.onPointerDown(4, 110f, 200f, 50L)
+        engine.onPointerMove(4, 100f, 100f)
+        engine.onPointerUp(0, 100f, 100f, 200L)
+
+        assertEquals(1, sender.packets.size)
+        val packet = sender.packets.first()
+        assertEquals(Protocol.PacketKind.Gesture, packet.kind)
+        assertEquals(Protocol.GestureKind.SwipeUp, packet.gestureKind)
+        assertEquals(3.toByte(), packet.fingers)
+    }
+
+    @Test
+    fun pointerCancelResetsGestureTrackingWithoutSendingPacket() {
+        engine.onPointerDown(3, 100f, 200f, 0L)
+        engine.onPointerMove(3, 100f, 150f)
+        engine.onPointerCancel()
+        engine.onPointerUp(0, 100f, 150f, 200L)
+        assertTrue(sender.packets.isEmpty())
+    }
+
+    @Test
+    fun partialPointerUpDuringThreeFingerSwipeStillSendsGesture() {
+        engine.onPointerDown(3, 100f, 200f, 0L)
+        engine.onPointerMove(3, 100f, 100f)
+        engine.onPointerUp(2, 100f, 100f, 100L)
+        engine.onPointerUp(1, 100f, 100f, 120L)
+        engine.onPointerUp(0, 100f, 100f, 140L)
+
+        assertEquals(1, sender.packets.size)
+        val packet = sender.packets.first()
+        assertEquals(Protocol.PacketKind.Gesture, packet.kind)
+        assertEquals(Protocol.GestureKind.SwipeUp, packet.gestureKind)
+        assertEquals(3.toByte(), packet.fingers)
+    }
+
     private class RecordingInputSender : InputSender() {
         val packets = mutableListOf<Protocol.InputPacket>()
 

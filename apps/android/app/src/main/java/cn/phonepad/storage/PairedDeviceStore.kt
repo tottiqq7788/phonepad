@@ -6,6 +6,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
+import cn.phonepad.protocol.Protocol
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -35,7 +36,7 @@ class PairedDeviceStore(context: Context) {
         devices.forEach { device ->
             array.put(device.toJson())
         }
-        prefs.edit().putString(KEY_DEVICES, array.toString()).apply()
+        prefs.edit().putString(KEY_DEVICES, array.toString()).commit()
     }
 
     fun upsert(device: PairedDevice): List<PairedDevice> {
@@ -77,6 +78,7 @@ class PairedDeviceStore(context: Context) {
             .put("tcpPort", tcpPort)
             .put("udpPort", udpPort)
             .put("secret", secret)
+            .put("discoveryPort", discoveryPort)
             .put("lastConnectedAt", lastConnectedAt)
     }
 
@@ -88,6 +90,7 @@ class PairedDeviceStore(context: Context) {
             tcpPort = getInt("tcpPort"),
             udpPort = getInt("udpPort"),
             secret = getString("secret"),
+            discoveryPort = optInt("discoveryPort", Protocol.UDP_DISCOVERY_PORT),
             lastConnectedAt = optLong("lastConnectedAt"),
         )
     }

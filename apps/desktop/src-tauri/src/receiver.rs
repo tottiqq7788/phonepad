@@ -220,6 +220,13 @@ pub fn start(
     })
 }
 
+const MAX_SEQUENCE_FORWARD_GAP: u32 = 512;
+
+fn rejects_sequence_forward_jump(last_sequence: u32, packet_sequence: u32) -> bool {
+    last_sequence > 0
+        && packet_sequence > last_sequence.saturating_add(MAX_SEQUENCE_FORWARD_GAP)
+}
+
 fn spawn_input_loop(
     app: AppHandle,
     socket: UdpSocket,
@@ -283,6 +290,16 @@ fn spawn_input_loop(
                 last_sequence = 0;
             }
 
+            if rejects_sequence_forward_jump(last_sequence, packet.sequence) {
+                logging::debug(
+                    "udp_input",
+                    "sequence_gap_rejected",
+                    &format!("peer={peer} seq={} last={last_sequence}", packet.sequence),
+                );
+                status.lock().unwrap().packets_dropped += 1;
+                continue;
+            }
+
             if packet.sequence <= last_sequence
                 && last_sequence.wrapping_sub(packet.sequence) < 10_000
             {
@@ -327,6 +344,7 @@ fn spawn_input_loop(
                 let kind = match packet.gesture_kind {
                     Some(kind) => kind,
                     None => {
+                        logging::warn("gesture", "dropped", "reason=missing_kind");
                         status.lock().unwrap().packets_dropped += 1;
                         continue;
                     }
@@ -334,10 +352,20 @@ fn spawn_input_loop(
                 let phase = match packet.gesture_phase {
                     Some(phase) => phase,
                     None => {
+                        logging::warn(
+                            "gesture",
+                            "dropped",
+                            &format!("reason=missing_phase kind={kind:?}"),
+                        );
                         status.lock().unwrap().packets_dropped += 1;
                         continue;
                     }
                 };
+                logging::info(
+                    "gesture",
+                    "received",
+                    &format!("kind={kind:?} phase={phase:?} fingers={}", packet.fingers),
+                );
                 let gesture_result = {
                     let mut controller = match input.lock() {
                         Ok(controller) => controller,
@@ -357,6 +385,7 @@ fn spawn_input_loop(
                 };
                 match gesture_result {
                     Err(err) => {
+                        logging::error("gesture", "execute_failed", &format!("reason={err}"));
                         let _ = app.emit("receiver://error", err);
                     }
                     Ok(GestureOutcome::ScreenshotSaved(path)) => {
@@ -384,7 +413,16 @@ fn spawn_input_loop(
                         );
                         let _ = app.emit("receiver://error", format!("截图保存失败: {error}"));
                     }
-                    Ok(_) => {}
+                    Ok(GestureOutcome::Executed) => {
+                        logging::info("gesture", "executed", &format!("kind={kind:?}"));
+                    }
+                    Ok(GestureOutcome::Ignored) => {
+                        logging::info(
+                            "gesture",
+                            "ignored",
+                            &format!("kind={kind:?} phase={phase:?}"),
+                        );
+                    }
                 }
                 continue;
             }
@@ -1123,5 +1161,12 @@ mod tests {
         assert_eq!(decoded.gesture_phase, None);
         assert_eq!(decoded.gesture_kind, Some(GestureKind::SwipeDown));
         let _ = GesturePhase::End;
+    }
+
+    #[test]
+    fn rejects_stale_high_sequence_after_low_session_packets() {
+        assert!(rejects_sequence_forward_jump(3, 12_000));
+        assert!(!rejects_sequence_forward_jump(3, 400));
+        assert!(!rejects_sequence_forward_jump(0, 12_000));
     }
 }
