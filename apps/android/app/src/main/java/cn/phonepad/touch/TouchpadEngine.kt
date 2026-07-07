@@ -106,6 +106,8 @@ class TouchpadEngine(
             }
             if (mode == Mode.OneFinger || mode == Mode.TwoFinger) {
                 startFlushLoop()
+            } else {
+                stopFlushLoop()
             }
         }
     }
@@ -199,6 +201,11 @@ class TouchpadEngine(
                 lastSentX = 0f
                 lastSentY = 0f
                 moved = false
+                if (mode == Mode.OneFinger || mode == Mode.TwoFinger) {
+                    startFlushLoop()
+                } else {
+                    stopFlushLoop()
+                }
             }
         }
 
@@ -245,7 +252,7 @@ class TouchpadEngine(
         if (!enableScheduledFlush || flushTask != null) return
         flushTask = flushExecutor.scheduleAtFixedRate(
             { flushPendingMotionForTest() },
-            frameIntervalMs,
+            0,
             frameIntervalMs,
             TimeUnit.MILLISECONDS,
         )

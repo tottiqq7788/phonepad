@@ -22,14 +22,11 @@ use crate::{
     file_transfer::{self, FileBeginResponse, FileCommitResponse, FileTransferManager},
     input::{normalize_key_repeat, parse_key_action, parse_key_event, reset_modifier_tracker, InputController},
     logging::{self, short_id},
-    motion_aggregator::MotionAggregator,
     platform,
     preferences::AppPreferences,
     settings::ReceiverSettings,
     state::AppState,
 };
-
-const INPUT_APPLY_INTERVAL_MS: u64 = 16;
 
 pub const MAX_TEXT_CHARS: usize = 4096;
 pub const MAX_TEXT_BYTES: usize = 6000;
@@ -89,7 +86,6 @@ struct ControlRequest {
     transfer_id: Option<String>,
     file_name: Option<String>,
     file_size: Option<u64>,
-    mime_type: Option<String>,
     batch_id: Option<String>,
     file_index: Option<u32>,
     total_files: Option<u32>,
@@ -175,22 +171,14 @@ pub fn start(
         ..ReceiverStatus::default()
     }));
 
-    let motion = Arc::new(Mutex::new(MotionAggregator::default()));
     let input_handle = spawn_input_loop(
         app.clone(),
         udp_socket,
         settings.clone(),
         device.clone(),
         input.clone(),
-        motion.clone(),
         shutdown.clone(),
         status.clone(),
-    );
-    let applier_handle = spawn_input_applier_loop(
-        settings.clone(),
-        input.clone(),
-        motion,
-        shutdown.clone(),
     );
     let discovery_handle =
         spawn_discovery_loop(discovery_socket, device.clone(), shutdown.clone());
@@ -219,53 +207,10 @@ pub fn start(
         status,
         workers: Mutex::new(vec![
             input_handle,
-            applier_handle,
             discovery_handle,
             control_handle,
             file_handle,
         ]),
-    })
-}
-
-fn apply_pending_motion(
-    motion: &Arc<Mutex<MotionAggregator>>,
-    input: &Arc<Mutex<InputController>>,
-    settings: &ReceiverSettings,
-) {
-    let (move_dx, move_dy, scroll_dx, scroll_dy) = {
-        let mut aggregator = motion.lock().unwrap();
-        let (move_dx, move_dy) = aggregator.take_move();
-        let (scroll_dx, scroll_dy) = aggregator.take_scroll();
-        (move_dx, move_dy, scroll_dx, scroll_dy)
-    };
-
-    if move_dx == 0 && move_dy == 0 && scroll_dx == 0 && scroll_dy == 0 {
-        return;
-    }
-
-    if let Ok(mut controller) = input.lock() {
-        if move_dx != 0 || move_dy != 0 {
-            let _ = controller.move_mouse(move_dx, move_dy, settings);
-        }
-        if scroll_dx != 0 || scroll_dy != 0 {
-            let _ = controller.scroll(scroll_dx, scroll_dy, settings);
-        }
-    }
-}
-
-fn spawn_input_applier_loop(
-    settings: Arc<Mutex<ReceiverSettings>>,
-    input: Arc<Mutex<InputController>>,
-    motion: Arc<Mutex<MotionAggregator>>,
-    shutdown: Arc<AtomicBool>,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        while !shutdown.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(INPUT_APPLY_INTERVAL_MS));
-
-            let current_settings = settings.lock().unwrap().clone();
-            apply_pending_motion(&motion, &input, &current_settings);
-        }
     })
 }
 
@@ -275,7 +220,6 @@ fn spawn_input_loop(
     settings: Arc<Mutex<ReceiverSettings>>,
     device: Arc<Mutex<DeviceConfig>>,
     input: Arc<Mutex<InputController>>,
-    motion: Arc<Mutex<MotionAggregator>>,
     shutdown: Arc<AtomicBool>,
     status: Arc<Mutex<ReceiverStatus>>,
 ) -> JoinHandle<()> {
@@ -323,7 +267,6 @@ fn spawn_input_loop(
                 last_peer = Some(peer);
                 last_sequence = 0;
                 reset_modifier_tracker();
-                motion.lock().unwrap().clear();
                 if let Ok(mut controller) = input.lock() {
                     controller.reset_scroll_remainder();
                 }
@@ -364,51 +307,36 @@ fn spawn_input_loop(
             }
 
             let current_settings = settings.lock().unwrap().clone();
-            let result = match packet.kind {
-                PacketKind::Move => {
-                    motion.lock().unwrap().accumulate_move(packet.x, packet.y);
-                    Ok(())
-                }
-                PacketKind::Scroll => {
-                    motion.lock().unwrap().accumulate_scroll(packet.x, packet.y);
-                    Ok(())
-                }
-                PacketKind::Click => {
-                    apply_pending_motion(&motion, &input, &current_settings);
-                    let mut controller = match input.lock() {
-                        Ok(controller) => controller,
-                        Err(_) => {
-                            status.lock().unwrap().packets_dropped += 1;
-                            continue;
-                        }
-                    };
-                    match packet.button {
+            let result = {
+                let mut controller = match input.lock() {
+                    Ok(controller) => controller,
+                    Err(_) => {
+                        status.lock().unwrap().packets_dropped += 1;
+                        continue;
+                    }
+                };
+                match packet.kind {
+                    PacketKind::Move => controller.move_mouse(packet.x, packet.y, &current_settings),
+                    PacketKind::Scroll => controller.scroll(packet.x, packet.y, &current_settings),
+                    PacketKind::Click => match packet.button {
                         Some(button) => controller.click(button),
                         None => {
                             status.lock().unwrap().packets_dropped += 1;
                             continue;
                         }
-                    }
-                }
-                PacketKind::Button => {
-                    apply_pending_motion(&motion, &input, &current_settings);
-                    let mut controller = match input.lock() {
-                        Ok(controller) => controller,
-                        Err(_) => {
-                            status.lock().unwrap().packets_dropped += 1;
-                            continue;
-                        }
-                    };
-                    let action = packet.action.unwrap_or(ButtonAction::Click);
-                    match packet.button {
-                        Some(button) => controller.button(button, action),
-                        None => {
-                            status.lock().unwrap().packets_dropped += 1;
-                            continue;
+                    },
+                    PacketKind::Button => {
+                        let action = packet.action.unwrap_or(ButtonAction::Click);
+                        match packet.button {
+                            Some(button) => controller.button(button, action),
+                            None => {
+                                status.lock().unwrap().packets_dropped += 1;
+                                continue;
+                            }
                         }
                     }
+                    _ => Ok(()),
                 }
-                _ => Ok(()),
             };
 
             if let Err(err) = result {

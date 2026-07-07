@@ -41,7 +41,6 @@ type Settings = {
   sensitivity: number;
   acceleration: number;
   scrollSensitivity: number;
-  lowLatencyMode: boolean;
 };
 
 type PreferencesInfo = {
@@ -55,7 +54,6 @@ const defaultSettings: Settings = {
   sensitivity: 1.0,
   acceleration: 0.18,
   scrollSensitivity: 1.0,
-  lowLatencyMode: true,
 };
 
 export default function App() {

@@ -23,8 +23,10 @@ pub struct PairingInfo {
 }
 
 pub fn build_pairing_info(device: &DeviceConfig, last_client: Option<&str>) -> PairingInfo {
-    let candidates = collect_ipv4_candidates();
-    let recommended = select_recommended_ip(&candidates, last_client);
+    let preferred = preferred_ipv4s();
+    let candidates = collect_ipv4_candidates(preferred.as_deref());
+    let recommended =
+        select_recommended_ip_with_filter(&candidates, last_client, preferred.as_deref());
     let all_ips: Vec<String> = candidates.iter().map(|c| c.ip.to_string()).collect();
 
     let connection_url = if recommended.is_empty() {
@@ -63,9 +65,8 @@ struct IpCandidate {
     score: i32,
 }
 
-fn collect_ipv4_candidates() -> Vec<IpCandidate> {
+fn collect_ipv4_candidates(preferred: Option<&[Ipv4Addr]>) -> Vec<IpCandidate> {
     let mut candidates = Vec::new();
-    let preferred = preferred_ipv4s();
 
     if let Ok(interfaces) = list_afinet_netifas() {
         for (_name, ip) in interfaces {
@@ -87,11 +88,6 @@ fn collect_ipv4_candidates() -> Vec<IpCandidate> {
     candidates.sort_by(|a, b| b.score.cmp(&a.score));
     candidates.dedup_by(|a, b| a.ip == b.ip);
     candidates
-}
-
-fn select_recommended_ip(candidates: &[IpCandidate], last_client: Option<&str>) -> String {
-    let preferred = preferred_ipv4s();
-    select_recommended_ip_with_filter(candidates, last_client, preferred.as_deref())
 }
 
 fn select_recommended_ip_with_filter(
@@ -132,6 +128,7 @@ fn select_recommended_ip_with_filter(
 }
 
 pub fn discovery_response_ip(peer: SocketAddr) -> String {
+    let preferred = preferred_ipv4s();
     let peer_hint = peer.to_string();
     if let IpAddr::V4(peer_v4) = peer.ip() {
         if let Some(local) = local_ip_for_peer(peer_v4) {
@@ -140,7 +137,7 @@ pub fn discovery_response_ip(peer: SocketAddr) -> String {
             }
         }
 
-        let candidates = collect_ipv4_candidates();
+        let candidates = collect_ipv4_candidates(preferred.as_deref());
         if let Some(local) = candidates
             .iter()
             .find(|c| same_subnet(c.ip, peer_v4) && !is_likely_virtual(c.ip))
@@ -148,11 +145,15 @@ pub fn discovery_response_ip(peer: SocketAddr) -> String {
             return local.ip.to_string();
         }
 
-        return select_recommended_ip(&candidates, Some(&peer_hint));
+        return select_recommended_ip_with_filter(
+            &candidates,
+            Some(&peer_hint),
+            preferred.as_deref(),
+        );
     }
 
-    let candidates = collect_ipv4_candidates();
-    select_recommended_ip(&candidates, Some(&peer_hint))
+    let candidates = collect_ipv4_candidates(preferred.as_deref());
+    select_recommended_ip_with_filter(&candidates, Some(&peer_hint), preferred.as_deref())
 }
 
 fn same_subnet(local: Ipv4Addr, peer: Ipv4Addr) -> bool {

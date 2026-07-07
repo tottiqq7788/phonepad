@@ -73,6 +73,8 @@ import cn.phonepad.ConnectionManager
 import cn.phonepad.ConnectionUiState
 import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
+import cn.phonepad.model.countOnlineSwitchable
+import cn.phonepad.model.onlineSwitchable
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material3.AlertDialog
@@ -152,6 +154,7 @@ private fun DeviceHomeScreen(
 ) {
     val context = LocalContext.current
     var scanError by remember { mutableStateOf<String?>(null) }
+    var devicePendingDelete by remember { mutableStateOf<PairedDevice?>(null) }
 
     val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
         scanError = null
@@ -262,10 +265,38 @@ private fun DeviceHomeScreen(
                         device = device,
                         connecting = state.connecting,
                         onClick = { onConnectDevice(device.id) },
-                        onDelete = { onRemoveDevice(device.id) },
+                        onDelete = { devicePendingDelete = device },
                     )
                 }
             }
+        }
+
+        devicePendingDelete?.let { device ->
+            AlertDialog(
+                onDismissRequest = { devicePendingDelete = null },
+                title = { Text("删除设备", color = TextPrimary) },
+                text = {
+                    Text(
+                        text = "确定删除「${device.name}」？此操作不可恢复。",
+                        color = TextSecondary,
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            onRemoveDevice(device.id)
+                            devicePendingDelete = null
+                        },
+                    ) {
+                        Text("删除", color = ErrorColor)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { devicePendingDelete = null }) {
+                        Text("取消", color = TextSecondary)
+                    }
+                },
+            )
         }
     }
 }
@@ -499,10 +530,7 @@ private fun TouchpadScreen(
 
                 if (state.showDevicePicker) {
                     DevicePickerOverlay(
-                        devices = state.pairedDevices.filter { device ->
-                            device.id == state.activeDeviceId ||
-                                device.onlineState == DeviceOnlineState.Online
-                        },
+                        devices = state.pairedDevices.onlineSwitchable(state.activeDeviceId),
                         activeDeviceId = state.activeDeviceId,
                         onDismiss = onCloseDevicePicker,
                         onSelectDevice = onSelectDevice,
@@ -1044,10 +1072,7 @@ private fun LeftRail(
 
         Spacer(modifier = Modifier.weight(1f))
 
-        val onlineSwitchableCount = state.pairedDevices.count { device ->
-            device.id == state.activeDeviceId || device.onlineState == DeviceOnlineState.Online
-        }
-        if (onlineSwitchableCount >= 2) {
+        if (state.pairedDevices.countOnlineSwitchable(state.activeDeviceId) >= 2) {
             RailIconButton(
                 icon = Icons.Filled.SwapHoriz,
                 contentDescription = "切换设备",
@@ -1154,20 +1179,6 @@ private fun RailButton(
             fontWeight = FontWeight.SemiBold,
             textAlign = TextAlign.Center,
         )
-    }
-}
-
-@Composable
-private fun ErrorBanner(message: String) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(ErrorColor.copy(alpha = 0.12f))
-            .border(1.dp, ErrorColor.copy(alpha = 0.3f), RoundedCornerShape(10.dp))
-            .padding(12.dp),
-    ) {
-        Text(text = message, color = ErrorColor, fontSize = 13.sp, lineHeight = 18.sp)
     }
 }
 

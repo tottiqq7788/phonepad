@@ -5,7 +5,6 @@ mod device_config;
 mod file_transfer;
 mod input;
 mod logging;
-mod motion_aggregator;
 mod notify;
 mod pairing;
 mod platform;

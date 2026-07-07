@@ -1,5 +1,6 @@
 package cn.phonepad.net
 
+import cn.phonepad.logging.PhonePadLogger
 import cn.phonepad.protocol.Protocol
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -36,11 +37,25 @@ open class InputSender {
         val authToken = Protocol.authToken(secret, nextSequence)
         val payload = packet.copy(sequence = nextSequence, authToken = authToken).encode()
         executor.execute {
-            if (secret.isBlank()) return@execute
-            runCatching {
+            if (secret.isBlank()) {
+                PhonePadLogger.w(
+                    "udp_input",
+                    "send_skipped",
+                    "reason=secret_blank host=$host port=$port kind=${packet.kind}",
+                )
+                return@execute
+            }
+            val result = runCatching {
                 val address = addressCache.getOrPut(host) { InetAddress.getByName(host) }
                 val datagram = DatagramPacket(payload, payload.size, address, port)
                 socket.send(datagram)
+            }
+            result.onFailure { error ->
+                PhonePadLogger.w(
+                    "udp_input",
+                    "send_failed",
+                    "host=$host port=$port kind=${packet.kind} error=${error.message ?: error.javaClass.simpleName}",
+                )
             }
         }
     }

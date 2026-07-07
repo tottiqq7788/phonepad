@@ -8,6 +8,7 @@ import cn.phonepad.haptics.HapticsManager
 import cn.phonepad.logging.PhonePadLogger
 import cn.phonepad.model.DeviceOnlineState
 import cn.phonepad.model.PairedDevice
+import cn.phonepad.model.onlineSwitchable
 import cn.phonepad.net.ControlClient
 import cn.phonepad.net.DiscoveryClient
 import cn.phonepad.net.FileTransferClient
@@ -67,7 +68,6 @@ class ConnectionManager(
     private var monitorJob: Job? = null
     private var onlineJob: Job? = null
     private var onlineRefreshJob: Job? = null
-    private var textSendJob: Job? = null
     private var transferJob: Job? = null
     private var connectJob: Job? = null
     @Volatile
@@ -393,19 +393,12 @@ class ConnectionManager(
     }
 
     fun disconnect() {
-        connectJob?.cancel()
-        ++connectGeneration
+        teardownActiveSession()
         PhonePadLogger.i(
             "connection",
             "disconnect",
             "device_id=${PhonePadLogger.shortId(uiState.activeDeviceId)}",
         )
-        stopActiveTransfer()
-        releaseHeldKeyboardModifiers()
-        monitorJob?.cancel()
-        textSendJob?.cancel()
-        touchpadEngine.setTarget(null)
-        inputSender.setSecret("")
         uiState = uiState.copy(
             connected = false,
             connecting = false,
@@ -430,14 +423,7 @@ class ConnectionManager(
         }
         val wasActive = uiState.activeDeviceId == deviceId
         if (wasActive) {
-            connectJob?.cancel()
-            ++connectGeneration
-            stopActiveTransfer()
-            releaseHeldKeyboardModifiers()
-            monitorJob?.cancel()
-            textSendJob?.cancel()
-            touchpadEngine.setTarget(null)
-            inputSender.setSecret("")
+            teardownActiveSession()
         }
         val updated = store.remove(deviceId)
         PhonePadLogger.i(
@@ -456,19 +442,19 @@ class ConnectionManager(
             error = null,
             showDevicePicker = false,
             textSending = if (wasActive) false else uiState.textSending,
+            textInputError = if (wasActive) null else uiState.textInputError,
             transferSending = if (wasActive) false else uiState.transferSending,
             transferProgress = if (wasActive) null else uiState.transferProgress,
         )
+        if (wasActive) {
+            haptics.disconnected()
+        }
         refreshOnlineStates()
     }
 
     /** 当前可切换的在线设备：active 设备视为在线，其余仅保留 Online 状态。 */
-    fun onlineSwitchableDevices(): List<PairedDevice> {
-        val activeId = uiState.activeDeviceId
-        return uiState.pairedDevices.filter { device ->
-            device.id == activeId || device.onlineState == DeviceOnlineState.Online
-        }
-    }
+    fun onlineSwitchableDevices(): List<PairedDevice> =
+        uiState.pairedDevices.onlineSwitchable(uiState.activeDeviceId)
 
     fun openDevicePicker() {
         val online = onlineSwitchableDevices()
@@ -542,12 +528,8 @@ class ConnectionManager(
             uiState = uiState.copy(textInputError = null)
 
             if (trimmed.isNotEmpty()) {
-                if (trimmed.length > MAX_TEXT_CHARS) {
-                    uiState = uiState.copy(textInputError = "文本超过 $MAX_TEXT_CHARS 字符限制")
-                    return@launch
-                }
-                if (trimmed.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) {
-                    uiState = uiState.copy(textInputError = "文本过长，请缩短后重试")
+                validateTextContent(trimmed)?.let { message ->
+                    uiState = uiState.copy(textInputError = message)
                     return@launch
                 }
                 uiState = uiState.copy(textSending = true)
@@ -641,57 +623,12 @@ class ConnectionManager(
     }
 
     fun sendTextToActiveDevice(text: String, onSuccess: () -> Unit = {}) {
-        if (uiState.textSending) {
-            return
-        }
-        textSendJob?.cancel()
-        textSendJob = scope.launch {
-            val trimmed = text.trim()
-            if (trimmed.isEmpty()) {
-                uiState = uiState.copy(textInputError = "请输入要发送的内容")
-                return@launch
-            }
-            if (trimmed.length > MAX_TEXT_CHARS) {
-                uiState = uiState.copy(textInputError = "文本超过 $MAX_TEXT_CHARS 字符限制")
-                return@launch
-            }
-            if (trimmed.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) {
-                uiState = uiState.copy(textInputError = "文本过长，请缩短后重试")
-                return@launch
-            }
-            if (!uiState.connected || uiState.activeDeviceId.isBlank()) {
-                uiState = uiState.copy(textInputError = "设备未连接")
-                return@launch
-            }
-            val device = store.load().firstOrNull { it.id == uiState.activeDeviceId }
-            if (device == null) {
-                uiState = uiState.copy(textInputError = "设备不存在，请重新连接")
-                return@launch
-            }
-
-            uiState = uiState.copy(textSending = true, textInputError = null)
-            val response = controlClient.sendText(
-                host = device.host,
-                deviceId = device.id,
-                secret = device.secret,
-                port = device.tcpPort,
-                text = trimmed,
-            )
-            if (!isActive || !uiState.connected) {
-                uiState = uiState.copy(textSending = false)
-                return@launch
-            }
-            if (response.ok) {
-                haptics.textSent()
-                uiState = uiState.copy(textSending = false, textInputError = null)
-                onSuccess()
-            } else {
-                uiState = uiState.copy(
-                    textSending = false,
-                    textInputError = response.error ?: "发送失败，请确认桌面端仍在接收",
-                )
-            }
-        }
+        sendInputModeContent(
+            text = text,
+            attachments = emptyList(),
+            onTextCleared = onSuccess,
+            onCompleted = onSuccess,
+        )
     }
 
     fun sendKeyActionToActiveDevice(action: String, repeat: Int = 1) {
@@ -852,8 +789,31 @@ class ConnectionManager(
         stopActiveTransfer()
         monitorJob?.cancel()
         onlineJob?.cancel()
-        textSendJob?.cancel()
         touchpadEngine.release()
         inputSender.close()
+    }
+
+    private fun teardownActiveSession() {
+        connectJob?.cancel()
+        ++connectGeneration
+        stopActiveTransfer()
+        releaseHeldKeyboardModifiers()
+        monitorJob?.cancel()
+        transferJob?.cancel()
+        touchpadEngine.setTarget(null)
+        inputSender.setSecret("")
+    }
+
+    private fun validateTextContent(trimmed: String): String? {
+        if (trimmed.isEmpty()) {
+            return "请输入要发送的内容"
+        }
+        if (trimmed.length > MAX_TEXT_CHARS) {
+            return "文本超过 $MAX_TEXT_CHARS 字符限制"
+        }
+        if (trimmed.toByteArray(Charsets.UTF_8).size > MAX_TEXT_BYTES) {
+            return "文本过长，请缩短后重试"
+        }
+        return null
     }
 }
